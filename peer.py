@@ -39,9 +39,9 @@ class SendThread(threading.Thread):
         self.socket.sendto(bencode.encode(packet), self.node)
         self.socket.settimeout(2)
         data, address = self.socket.recvfrom()
-        response = self.check_data(data)
-        if response is False:
-            return False # Probably should try it again
+        response = self.check_data(data, address)
+        if type(response) is bool:
+            return response # Probably should try it again if false
         
         ack_flag = False
         if response["type"] == "ack":
@@ -49,61 +49,76 @@ class SendThread(threading.Thread):
             if response["txid"] != packet["txid"]:
                 return False # Probabaly should try it again
             data, address = self.socket.recvfrom()
-            response = self.check_data(data)
+            response = self.check_data(data, address)
             if response is False:
                 return False # Probably should try it again
 
         if response["type"] == "list":
-            updated_list = self.check_list(response)
+            updated_list = self.check_list(response, address)
             if not type(updated_list) == list:
                 return False # Probably should try it again
             if not ack_flag:
                 data, address = self.socket.recvfrom()
         else:
+            self.send_error("Expected packet type 'list'. Got '" + response["type"], address)
             return False # Probably should try it again
         
         self.peerlist.clear()
         self.peerlist.append(updated_list)
 
         if self.message != None:
-            address = self.find_peer_address(message["to"])
+            address = self.find_peer_address(self.message["to"])
             if address == None:
-                tools.err_print("Error: No peer with username '" + message["to"] + "' found.")
+                tools.err_print("Error: No peer with username '" + self.message["to"] + "' found.")
                 return False
-            self.socket.sendto(bencode.encode(message), address)
-            data, address = self.socket.recvfrom()
-            response = self.check_data(data)
-            if response["type"] == "ack" and response["txid"] == message["txid"]:
+            self.socket.sendto(bencode.encode(self.message), address)
+            data, address = self.socket.recvfrom(4096)
+            response = self.check_data(data, address)
+            if response["type"] == "ack" and response["txid"] == self.message["txid"]:
                 return True
             return False # Probably should try it again
 
     def find_peer_address(self, username):
         for p in self.peerlist:
             if p["username"] == username:
-                return (p["ip"], p["port"])
+                return (p["ipv4"], p["port"])
         return None
 
-    def check_data(self, data):
+    def check_data(self, data, sender):
         try:
-            ack = bencode.decode(data)
-        except TypeError:
-            self.send_error("The packet could not be decoded.")
+            packet = bencode.decode(data)
+        except Exception:
+            self.send_error("The packet could not be decoded.", sender)
             return False
-        if not type(ack) == dict:
-            self.send_error("Wrong packet format. Expected json.")
+        if not type(packet) == dict:
+            self.send_error("Wrong packet format. Expected json.", sender)
             return False
-        if not ("type" in ack and "txid" in ack):
-            self.send_error("Missing fields in packet. Expected 'type' and 'txid'.")
+        if not ("type" in packet and "txid" in packet):
+            self.send_error("Missing fields in packet. Expected at least 'type' and 'txid'.", sender)
             return False
-        if not ack["type"] == "ack":
-            self.send_error("Wrong packet format.")
-            return False
+        if packet["type"] == "error":
+            if "verbose" in packet:
+                tools.err_print("Error: " + packet["verbose"])
+            else:
+                tools.err_print("Unknown error.")
+            return True
+        return packet
 
-    def check_list(self, data):
-        pass
+    def check_list(self, packet, sender):
+        if not "peers" in packet:
+            self.send_error("Missing 'peers' field.", sender)
+            return False
+        peers = packet["peers"]
+        if not type(peers) == dict:
+            self.send_error("Invalid contents of 'peers' field.", sender)
+            return False
+        updated_list = []
+        for p in peers.values():
+            updated_list.append(p)
+        return updated_list
 
-    def send_error(self, message):
-        self.socket.sendto(PeerDaemon.create_packet("error", verbose = message))
+    def send_error(self, message, recipient):
+        self.socket.sendto(PeerDaemon.create_packet("error", verbose = message), recipient)
 
 class ListenThread(threading.Thread):
     def __init__(self, username, ip, port):
@@ -125,6 +140,7 @@ class PeerDaemon:
         self.info = info
         self.hello_packet = PeerDaemon.create_packet("hello", username = info.username, ipv4 = str(info.chat_ipv4), port = info.chat_port)
         self.peers = []
+        self.peers.append({"username": "xjerab21", "ipv4": "192.168.1.103", "port": 12345})
         self.listen_thread = None
         self.hello_thread = HelloThread(self.hello_packet, (self.info.reg_ipv4, self.info.reg_port))
         self.hello_thread.start()

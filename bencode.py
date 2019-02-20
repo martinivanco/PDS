@@ -48,7 +48,7 @@ return:
     global __data, __s, __l, __enc;
     if enc != False:
         __enc = enc;
-    if type(x) != bytes:
+    if type(x) != bytes and x != None:
         raise TypeError("To decode the data type must be bytes.")
     elif x != None:
         __s = 0;
