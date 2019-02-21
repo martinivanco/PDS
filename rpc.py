@@ -27,17 +27,17 @@ def main():
             help = "task to perform at given peer or node")
 
     if any(a in ("message", "-h", "--help") for a in sys.argv):
-        parser.add_argument("--from", required = "message" in sys.argv, metavar = "<username>",
+        parser.add_argument("-f", "--from", required = "message" in sys.argv, metavar = "<username>",
             help = "sender")
-        parser.add_argument("--to", required = "message" in sys.argv, metavar = "<username>",
+        parser.add_argument("-t", "--to", required = "message" in sys.argv, metavar = "<username>",
             help = "recipient")
-        parser.add_argument("--message", required = "message" in sys.argv, metavar = "<message>",
+        parser.add_argument("-m", "--message", required = "message" in sys.argv, metavar = "<message>",
             help = "message content")
     if any(a in ("connect", "disconnect", "reconnect", "sync", "-h", "--help") for a in sys.argv):
-        parser.add_argument("--reg-ipv4", required = any(a in ("connect", "disconnect", "reconnect", "sync") for a in sys.argv),
+        parser.add_argument("-ri", "--reg-ipv4", required = any(a in ("connect", "disconnect", "reconnect", "sync") for a in sys.argv),
             metavar = "<ip addr>", type = tools.ip_check, help = "nodes IP address")
     if any(a in ("connect", "reconnect", "-h", "--help") for a in sys.argv):
-        parser.add_argument("--reg-port", required = any(a in ("connect", "reconnect") for a in sys.argv),
+        parser.add_argument("-rp", "--reg-port", required = any(a in ("connect", "reconnect") for a in sys.argv),
             metavar = "<port>", type = tools.port_check, help = "nodes operating port")
 
     args = parser.parse_args()
@@ -52,15 +52,15 @@ def main():
     elif args.command == 'reconnect':
         s.change_reg_node(str(args.reg_ipv4), args.reg_port)
     elif args.command == 'database':
-        pass
+        print(s.get_database())
     elif args.command == 'neighbors':
-        pass
+        print(s.get_neighbours())
     elif args.command == 'connect':
-        pass
+        s.connect_to_node(str(args.reg_ipv4), args.reg_port)
     elif args.command == 'disconnect':
-        pass
+        s.disconnect_from_node(str(args.reg_ipv4))
     elif args.command == 'sync':
-        pass
+        s.synchronise_with_node(str(args.reg_ipv4))
     else:
         parser.error("unknown command '" + args.command + "'")
 
