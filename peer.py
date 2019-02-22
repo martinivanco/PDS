@@ -40,7 +40,7 @@ class SendThread(threading.Thread):
         while attempts > 0:
             attempts -= self.get_list()
 
-        if self.message is not None:
+        if self.message is not None and attempts >= 0:
             attempts = 2
         while attempts > 0:
             attempts -= self.send_message()
@@ -53,6 +53,7 @@ class SendThread(threading.Thread):
             return response
 
         if response["type"] == "ack":
+            tools.dbg_print("got ack")
             if response["txid"] != get_packet["txid"]:
                 self.send_error("Unexpected acknowledgement for transaction " + str(response["txid"]) + ".", response["address"])
             response = self.recieve()
@@ -65,9 +66,14 @@ class SendThread(threading.Thread):
         updated_list = self.check_list(response)
         if type(updated_list) is int:
             return updated_list
+        ack = PeerDaemon.create_packet("ack")
+        ack["txid"] = response["txid"]
+        self.socket.sendto(bencode.encode(ack), response["address"])
 
+        tools.dbg_print("got list")
         self.peerlist.clear()
-        self.peerlist.append(updated_list)
+        for p in updated_list:
+            self.peerlist.append(p)
         return tools.OK
 
     def send_message(self):
@@ -76,13 +82,15 @@ class SendThread(threading.Thread):
             tools.err_print("Error: No peer with username '" + self.message["to"] + "' found.")
             return tools.ERR_FATAL
 
+        tools.dbg_print("sending message")
         self.socket.sendto(bencode.encode(self.message), address)
         response = self.recieve()
         if type(response) is int:
             return response
 
         if response["type"] == "ack":
-            if response["txid"] == get_packet["txid"]:
+            if response["txid"] == self.message["txid"]:
+                tools.dbg_print("everything went fine")
                 return tools.OK
             self.send_error("Unexpected acknowledgement for transaction " + str(response["txid"]) + ".", response["address"])
         return tools.ERR_RECOVER
@@ -128,7 +136,7 @@ class SendThread(threading.Thread):
         if not type(peers) == dict:
             self.send_error("Invalid contents of 'peers' field.", packet["address"])
             return tools.ERR_FATAL
-        updated_list = []
+        updated_list = [] # TODO thorough check
         for p in peers.values():
             updated_list.append(p)
         return updated_list
@@ -140,7 +148,8 @@ class SendThread(threading.Thread):
         return None
 
     def send_error(self, message, recipient):
-        self.socket.sendto(PeerDaemon.create_packet("error", verbose = message), recipient)
+        tools.dbg_print("sending error")
+        self.socket.sendto(bencode.encode(PeerDaemon.create_packet("error", verbose = message)), recipient)
 
 class ListenThread(threading.Thread):
     def __init__(self, username, ip, port):
@@ -155,7 +164,7 @@ class ListenThread(threading.Thread):
     def run(self):
         while True:
             data, address = self.socket.recvfrom(4096)
-            if data == "stop"
+            if data == "stop":
                 break
             message = self.check_message(data, address)
             if type(message) is int:
@@ -163,7 +172,7 @@ class ListenThread(threading.Thread):
 
             ack = PeerDaemon.create_packet("ack")
             ack["txid"] = message["txid"]
-            self.socket.sendto(ack, message["address"])
+            self.socket.sendto(bencode.encode(ack), message["address"])
             print(message["from"] + ": " + message["message"])
 
     def check_message(self, data, sender):
@@ -175,8 +184,8 @@ class ListenThread(threading.Thread):
         if not type(packet) == dict:
             self.send_error("Wrong packet format. Expected json.", sender)
             return tools.ERR_FATAL
-        if not ("type" in packet and "txid" in packet):
-            self.send_error("Missing fields in packet. Expected at least 'type' and 'txid'.", sender)
+        if not all(f in ("type", "txid", "from", "to", "message") for f in packet):
+            self.send_error("Missing fields in packet. Expected 'type', 'txid', 'from', 'to' and 'message'.", sender)
             return tools.ERR_FATAL
 
         if packet["type"] == "error":
@@ -184,6 +193,9 @@ class ListenThread(threading.Thread):
                 tools.err_print("Error: " + packet["verbose"])
             else:
                 tools.err_print("Unknown error.")
+            return tools.ERR_FATAL
+        if packet["type"] != "message":
+            self.send_error("Wrong type of packet. Expected 'message'.", sender)
             return tools.ERR_FATAL
 
         packet["address"] = sender
