@@ -2,79 +2,193 @@ import sys
 import time
 import argparse
 import threading
+import queue
 import socket
-import ipaddress
 import bencode
 import tools
 
+class PeerList:
+    def __init__(self):
+        self.peers = []
+        self.update_event = threading.Event()
+    
+    def get_list(self):
+        return self.peers
+
+    def get_address(self, username):
+        for p in self.peers:
+            if p["username"] == username:
+                return (p["ipv4"], p["port"])
+        return None
+
+    def update(self, updated_list):
+        self.peers.clear()
+        for p in updated_list:
+            self.peers.append(p)
+        self.update_event.set()
+        self.update_event.clear()
+
+class PacketQueue:
+    def __init__(self):
+        self.send_queue = queue.Queue()
+        self.ack_queue = [] # TODO MUTEX
+
+    def queue_message(self, packet, address, attempts = 1, timeout = 0):
+        self.send_queue.put({"packet": packet, "address": address,
+            "attempts": attempts, "timeout": timeout})
+    
+    def pop_message(self):
+        if self.send_queue.empty():
+            return None
+        else:
+            message = self.send_queue.get()
+            if message["timeout"] > 0:
+                self.queue_ack(message)
+            return 
+
+    def queue_ack(self, message):
+        message["timestamp"] = time.time()
+        self.ack_queue.append(message)
+
+    def pop_ack(self, txid):
+        for a in self.ack_queue:
+            # lock it
+            if a["packet"]["txid"] == txid:
+                self.ack_queue.remove(a)
+                return True
+            # unlock it
+        return False
+
+class TimerThread(threading.Thread):
+    def __init__(self, socket, packet_queue):
+        super(TimerThread, self).__init__()
+        # TODO
+
 class HelloThread(threading.Thread):
-    def __init__(self, packet, node):
+    def __init__(self, packet, node, packet_queue):
         super(HelloThread, self).__init__()
         self.packet = packet
-        self.node = (str(node[0]), node[1])
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.node = node
+        self.packet_queue = packet_queue
         self.stop_event = threading.Event()
         
     def run(self):
         while not self.stop_event.is_set():
             self.packet["txid"] = tools.generate_txid()
-            self.socket.sendto(bencode.encode(self.packet), self.node)
+            self.packet_queue.queue_message(self.packet, self.node)
             self.stop_event.wait(10)
         self.packet["txid"] = tools.generate_txid()
         self.packet["ipv4"] = "0.0.0.0"
         self.packet["port"] = 0
-        self.socket.sendto(bencode.encode(self.packet), self.node)
-        self.socket.close()
+        self.packet_queue.queue_message(self.packet, self.node)
 
 class SendThread(threading.Thread):
-    def __init__(self, node, peers, message = None):
+    def __init__(self, socket, packet_queue):
         super(SendThread, self).__init__()
-        self.node = (str(node[0]), node[1])
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.socket.settimeout(2)
-        self.peerlist = peers
-        self.message = message
+        self.socket = socket
+        self.packet_queue = packet_queue
+        self.stop_event = threading.Event()
 
     def run(self):
-        attempts = 2
-        while attempts > 0:
-            attempts -= self.get_list()
+        while not self.stop_event.is_set():
+            message = self.packet_queue.pop_message()
+            if message is not None:
+                tools.dbg_print("Sending: " + message["packet"] + "\nTo: " + message["address"])
+                self.socket.sendto(bencode.encode(message["packet"]), message["address"])
+            else
+                self.stop_event.wait(0.1)
 
-        if self.message is not None and attempts >= 0:
-            attempts = 2
-        while attempts > 0:
-            attempts -= self.send_message()
+class ListenThread(threading.Thread):
+    def __init__(self, socket, packet_queue, peer_list):
+        super(ListenThread, self).__init__()
+        self.socket = socket
+        self.packet_queue = packet_queue
+        self.peer_list = peer_list
 
-    def get_list(self):
-        get_packet = PeerDaemon.create_packet("getlist")
-        self.socket.sendto(bencode.encode(get_packet), self.node)
-        response = self.recieve()
-        if type(response) is int:
-            return response
+    def run(self):
+        while True:
+            message = self.recieve()
+            if message == "stop":
+                break
+            if message is False:
+                continue
 
-        if response["type"] == "ack":
-            tools.dbg_print("got ack")
-            if response["txid"] != get_packet["txid"]:
-                self.send_error("Unexpected acknowledgement for transaction " + str(response["txid"]) + ".", response["address"])
-            response = self.recieve()
-            if type(response) is int:
-                return response
+            if message["type"] == "list":
+                self.process_list(message)
+            elif message["type"] == "message":
+                self.process_message(message)
+            elif message["type"] == "ack":
+                self.packet_queue.pop_ack(message["txid"])
+            else:
+                tools.err_print("Error: Unexpected packet of type '{}'".format(message["type"]))
 
-        if response["type"] != "list":
-            self.send_error("Expected packet type 'list'. Got '" + response["type"], response["address"])
+    def recieve(self):
+        try:
+            data, address = self.socket.recvfrom(4096)
+        except OSError as err:
+            tools.err_print("OS error: {0}".format(err))
             return tools.ERR_FATAL
-        updated_list = self.check_list(response)
-        if type(updated_list) is int:
-            return updated_list
-        ack = PeerDaemon.create_packet("ack")
-        ack["txid"] = response["txid"]
-        self.socket.sendto(bencode.encode(ack), response["address"])
+        if data == "stop":
+            return "stop"
+        return self.check_data(data, address)
 
-        tools.dbg_print("got list")
-        self.peerlist.clear()
-        for p in updated_list:
-            self.peerlist.append(p)
-        return tools.OK
+    def check_data(self, data, sender):
+        try:
+            packet = bencode.decode(data)
+        except Exception:
+            self.send_error("The packet could not be decoded.", sender)
+            return False
+        if type(packet) is not dict:
+            self.send_error("Wrong packet format. Expected json.", sender)
+            return False
+        if not all(f in ("type", "txid") for f in packet):
+            self.send_error("Missing fields in packet. Expected at least 'type' and 'txid'.", sender)
+            return False
+
+        if packet["type"] == "error":
+            if "verbose" in packet:
+                tools.err_print("Error: " + packet["verbose"])
+            else:
+                tools.err_print("Unknown error.")
+            return False
+        
+        packet["address"] = sender
+        return packet
+
+    def process_list(self, message):
+        if not "peers" in message:
+            self.send_error("Missing 'peers' field in packet of type 'list'.", message["address"])
+            return False
+        peers = packet["peers"]
+        if not type(peers) == dict:
+            self.send_error("Invalid contents of 'peers' field.", message["address"])
+            return False
+        # TODO peer record format check
+
+        ack = PeerDaemon.create_packet("ack")
+        ack["txid"] = message["txid"]
+        self.packet_queue.queue_message(ack, message["address"])
+        self.peer_list.update(peers)
+
+    def process_message(self, message):
+        if not all(f in ("from", "to", "message") for f in message):
+            self.send_error("Missing fields in 'message' packet. Expected 'from', 'to' and 'message'.", sender)
+            return False
+        # TODO check if we are the correct recipient
+        print("{frm}: {msg}".format(frm = message["from"], msg = message["message"]))
+
+    def send_error(self, message, recipient):
+        self.packet_queue.queue_message(PeerDaemon.create_packet("error", verbose = message), recipient)
+
+class MessageThread(threading.Thread):
+    def __init__(self, message, peerlist, send_thread):
+        super(MessageThread, self).__init__()
+        self.message = message
+        self.peerlist = peerlist
+        self.send_thread = send_thread
+
+    def run(self):
+        pass # TODO
 
     def send_message(self):
         address = self.find_peer_address(self.message["to"])
@@ -95,143 +209,44 @@ class SendThread(threading.Thread):
             self.send_error("Unexpected acknowledgement for transaction " + str(response["txid"]) + ".", response["address"])
         return tools.ERR_RECOVER
 
-    def recieve(self):
-        try:
-            data, address = self.socket.recvfrom(4096)
-        except socket.timeout:
-            return tools.ERR_RECOVER
-        except OSError as err:
-            tools.err_print("OS error: {0}".format(err))
-            return tools.ERR_FATAL
-        return self.check_data(data, address)
-    
-    def check_data(self, data, sender):
-        try:
-            packet = bencode.decode(data)
-        except Exception:
-            self.send_error("The packet could not be decoded.", sender)
-            return tools.ERR_FATAL
-        if not type(packet) == dict:
-            self.send_error("Wrong packet format. Expected json.", sender)
-            return tools.ERR_FATAL
-        if not ("type" in packet and "txid" in packet):
-            self.send_error("Missing fields in packet. Expected at least 'type' and 'txid'.", sender)
-            return tools.ERR_FATAL
-
-        if packet["type"] == "error":
-            if "verbose" in packet:
-                tools.err_print("Error: " + packet["verbose"])
-            else:
-                tools.err_print("Unknown error.")
-            return tools.ERR_FATAL
-
-        packet["address"] = sender
-        return packet
-
-    def check_list(self, packet):
-        if not "peers" in packet:
-            self.send_error("Missing 'peers' field.", packet["address"])
-            return tools.ERR_FATAL
-        peers = packet["peers"]
-        if not type(peers) == dict:
-            self.send_error("Invalid contents of 'peers' field.", packet["address"])
-            return tools.ERR_FATAL
-        updated_list = [] # TODO thorough check
-        for p in peers.values():
-            updated_list.append(p)
-        return updated_list
-
-    def find_peer_address(self, username):
-        for p in self.peerlist:
-            if p["username"] == username:
-                return (p["ipv4"], p["port"])
-        return None
-
-    def send_error(self, message, recipient):
-        tools.dbg_print("sending error")
-        self.socket.sendto(bencode.encode(PeerDaemon.create_packet("error", verbose = message)), recipient)
-
-class ListenThread(threading.Thread):
-    def __init__(self, username, ip, port):
-        super(ListenThread, self).__init__()
-        self.username = username
-        self.ip = ip
-        self.port = port
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.socket.bind((ip, port))
-        self.socket.setblocking(True)
-
-    def run(self):
-        while True:
-            data, address = self.socket.recvfrom(4096)
-            if data == "stop":
-                break
-            message = self.check_message(data, address)
-            if type(message) is int:
-                continue
-
-            ack = PeerDaemon.create_packet("ack")
-            ack["txid"] = message["txid"]
-            self.socket.sendto(bencode.encode(ack), message["address"])
-            print(message["from"] + ": " + message["message"])
-
-    def check_message(self, data, sender):
-        try:
-            packet = bencode.decode(data)
-        except Exception:
-            self.send_error("The packet could not be decoded.", sender)
-            return tools.ERR_FATAL
-        if not type(packet) == dict:
-            self.send_error("Wrong packet format. Expected json.", sender)
-            return tools.ERR_FATAL
-        if not all(f in ("type", "txid", "from", "to", "message") for f in packet):
-            self.send_error("Missing fields in packet. Expected 'type', 'txid', 'from', 'to' and 'message'.", sender)
-            return tools.ERR_FATAL
-
-        if packet["type"] == "error":
-            if "verbose" in packet:
-                tools.err_print("Error: " + packet["verbose"])
-            else:
-                tools.err_print("Unknown error.")
-            return tools.ERR_FATAL
-        if packet["type"] != "message":
-            self.send_error("Wrong type of packet. Expected 'message'.", sender)
-            return tools.ERR_FATAL
-
-        packet["address"] = sender
-        return packet
-
 class PeerDaemon:
     def __init__(self, info):
         self.info = info
-        self.hello_packet = PeerDaemon.create_packet("hello", username = info.username, ipv4 = str(info.chat_ipv4), port = info.chat_port)
-        self.peers = []
-        self.peers.append({"username": "xjerab21", "ipv4": "192.168.1.103", "port": 12345})
-        self.listen_thread = None
-        self.hello_thread = HelloThread(self.hello_packet, (self.info.reg_ipv4, self.info.reg_port))
+        self.hello_packet = PeerDaemon.create_packet("hello",
+            username = info.username, ipv4 = str(self.info.chat_ipv4), port = self.info.chat_port)
+        self.peerlist = PeerList()
+
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind((self.info.char_ipv4, self.info.chat_port))
+        self.packet_queue = PacketQueue()
+        self.timer_thread = TimerThread()
+
+        # self.listen_thread = ListenThread(self.socket, self)
+        # self.send_thread = SendThread(self.socket, self)
+        self.hello_thread = HelloThread(self.hello_packet, (str(self.info.reg_ipv4), self.info.reg_port), self.packet_queue)
+        # self.listen_thread.start()
+        # self.send_thread.start()
         self.hello_thread.start()
 
     def send_message(self, sender, recipient, message):
         # what to do with sender?
-        send_thread = SendThread((self.info.reg_ipv4, self.info.reg_port), self.peers,
-            PeerDaemon.create_packet("message", fro = self.info.username, to = recipient, message = message))
-        send_thread.start()
+        message_thread = MessageThread(PeerDaemon.create_packet("message", fro = self.info.username, to = recipient, message = message), self.peerlist, self.send_thread)
+        message_thread.start()
         return True
 
     def update_peer_list(self):
-        send_thread = SendThread((self.info.reg_ipv4, self.info.reg_port), self.peers)
-        send_thread.start()
+        self.send_thread.queue(PeerDaemon.create_packet("getlist"))
         return True
 
     def get_peer_list(self):
-        return self.peers
+        return self.peerlist.get_list()
     
     def change_reg_node(self, ip_address, port):
         self.hello_thread.stop_event.set()
-        self.info.reg_ipv4 = ipaddress.ip_address(ip_address)
+        self.info.reg_ipv4 = ip_address
         self.info.reg_port = port
         self.hello_thread.join()
-        self.hello_thread = HelloThread(self.hello_packet, (self.info.reg_ipv4, self.info.reg_port))
+        self.hello_thread = HelloThread(self.hello_packet, (self.info.reg_ipv4, self.info.reg_port), self.packet_queue)
         self.hello_thread.start()
         return True
 
@@ -252,7 +267,13 @@ class PeerDaemon:
 
     def finish(self):
         self.hello_thread.stop_event.set()
+        # TODO wait for 0 HELLO is sent after finish
+        # self.send_thread.stop_event.set()
+        # self.listen_thread.stop_event.set()
         self.hello_thread.join()
+        # self.send_thread.join()
+        # self.listen_thread.join()
+        self.socket.close() 
 
 def main():
     parser = argparse.ArgumentParser(description="Peer Daemon for PDS18 P2P Chat")
@@ -281,4 +302,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
