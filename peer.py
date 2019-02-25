@@ -2,7 +2,6 @@ import sys
 import time
 import argparse
 import threading
-import queue
 import socket
 import bencode
 import tools
@@ -28,42 +27,6 @@ class PeerList:
         self.update_event.set()
         self.update_event.clear()
 
-class PacketQueue:
-    def __init__(self):
-        self.send_queue = queue.Queue()
-        self.ack_queue = [] # TODO MUTEX
-
-    def queue_message(self, packet, address, attempts = 1, timeout = 0):
-        self.send_queue.put({"packet": packet, "address": address,
-            "attempts": attempts, "timeout": timeout})
-    
-    def pop_message(self):
-        if self.send_queue.empty():
-            return None
-        else:
-            message = self.send_queue.get()
-            if message["timeout"] > 0:
-                self.queue_ack(message)
-            return 
-
-    def queue_ack(self, message):
-        message["timestamp"] = time.time()
-        self.ack_queue.append(message)
-
-    def pop_ack(self, txid):
-        for a in self.ack_queue:
-            # lock it
-            if a["packet"]["txid"] == txid:
-                self.ack_queue.remove(a)
-                return True
-            # unlock it
-        return False
-
-class TimerThread(threading.Thread):
-    def __init__(self, socket, packet_queue):
-        super(TimerThread, self).__init__()
-        # TODO
-
 class HelloThread(threading.Thread):
     def __init__(self, packet, node, packet_queue):
         super(HelloThread, self).__init__()
@@ -82,28 +45,12 @@ class HelloThread(threading.Thread):
         self.packet["port"] = 0
         self.packet_queue.queue_message(self.packet, self.node)
 
-class SendThread(threading.Thread):
-    def __init__(self, socket, packet_queue):
-        super(SendThread, self).__init__()
-        self.socket = socket
-        self.packet_queue = packet_queue
-        self.stop_event = threading.Event()
-
-    def run(self):
-        while not self.stop_event.is_set():
-            message = self.packet_queue.pop_message()
-            if message is not None:
-                tools.dbg_print("Sending: " + message["packet"] + "\nTo: " + message["address"])
-                self.socket.sendto(bencode.encode(message["packet"]), message["address"])
-            else
-                self.stop_event.wait(0.1)
-
 class ListenThread(threading.Thread):
-    def __init__(self, socket, packet_queue, peer_list):
+    def __init__(self, socket, packet_queue, peerlist):
         super(ListenThread, self).__init__()
         self.socket = socket
         self.packet_queue = packet_queue
-        self.peer_list = peer_list
+        self.peerlist = peerlist
 
     def run(self):
         while True:
@@ -127,8 +74,8 @@ class ListenThread(threading.Thread):
             data, address = self.socket.recvfrom(4096)
         except OSError as err:
             tools.err_print("OS error: {0}".format(err))
-            return tools.ERR_FATAL
-        if data == "stop":
+            return False
+        if data == bytes("stop", "utf-8"):
             return "stop"
         return self.check_data(data, address)
 
@@ -138,13 +85,13 @@ class ListenThread(threading.Thread):
         except Exception:
             self.send_error("The packet could not be decoded.", sender)
             return False
-        if type(packet) is not dict:
+        if not type(packet) is dict:
             self.send_error("Wrong packet format. Expected json.", sender)
             return False
         if not all(f in ("type", "txid") for f in packet):
             self.send_error("Missing fields in packet. Expected at least 'type' and 'txid'.", sender)
             return False
-
+        tools.dbg_print("Recieved: {msg}\nFrom: {frm}\n- - - - - - - - - -".format(msg = packet, frm = sender))
         if packet["type"] == "error":
             if "verbose" in packet:
                 tools.err_print("Error: " + packet["verbose"])
@@ -168,7 +115,7 @@ class ListenThread(threading.Thread):
         ack = PeerDaemon.create_packet("ack")
         ack["txid"] = message["txid"]
         self.packet_queue.queue_message(ack, message["address"])
-        self.peer_list.update(peers)
+        self.peerlist.update(peers)
 
     def process_message(self, message):
         if not all(f in ("from", "to", "message") for f in message):
@@ -181,33 +128,19 @@ class ListenThread(threading.Thread):
         self.packet_queue.queue_message(PeerDaemon.create_packet("error", verbose = message), recipient)
 
 class MessageThread(threading.Thread):
-    def __init__(self, message, peerlist, send_thread):
+    def __init__(self, message, packet_queue, peerlist, node):
         super(MessageThread, self).__init__()
         self.message = message
+        self.packet_queue = packet_queue
         self.peerlist = peerlist
-        self.send_thread = send_thread
+        self.node = node
 
     def run(self):
-        pass # TODO
-
-    def send_message(self):
-        address = self.find_peer_address(self.message["to"])
-        if address == None:
-            tools.err_print("Error: No peer with username '" + self.message["to"] + "' found.")
-            return tools.ERR_FATAL
-
-        tools.dbg_print("sending message")
-        self.socket.sendto(bencode.encode(self.message), address)
-        response = self.recieve()
-        if type(response) is int:
-            return response
-
-        if response["type"] == "ack":
-            if response["txid"] == self.message["txid"]:
-                tools.dbg_print("everything went fine")
-                return tools.OK
-            self.send_error("Unexpected acknowledgement for transaction " + str(response["txid"]) + ".", response["address"])
-        return tools.ERR_RECOVER
+        self.packet_queue.queue_message(PeerDaemon.create_packet("getlist"), self.node, 2, 2)
+        if self.peerlist.update_event.wait(5):
+            address = self.peerlist.get_address(self.message["to"])
+            if not address == None:
+                self.packet_queue.queue_message(self.message, address, 2, 2)
 
 class PeerDaemon:
     def __init__(self, info):
@@ -217,25 +150,25 @@ class PeerDaemon:
         self.peerlist = PeerList()
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.socket.bind((self.info.char_ipv4, self.info.chat_port))
-        self.packet_queue = PacketQueue()
-        self.timer_thread = TimerThread()
+        self.socket.bind((str(self.info.chat_ipv4), self.info.chat_port))
+        self.packet_queue = tools.PacketQueue()
 
-        # self.listen_thread = ListenThread(self.socket, self)
-        # self.send_thread = SendThread(self.socket, self)
+        self.listen_thread = ListenThread(self.socket, self.packet_queue, self.peerlist)
+        self.send_thread = tools.SendThread(self.socket, self.packet_queue)
         self.hello_thread = HelloThread(self.hello_packet, (str(self.info.reg_ipv4), self.info.reg_port), self.packet_queue)
-        # self.listen_thread.start()
-        # self.send_thread.start()
+        self.listen_thread.start()
+        self.send_thread.start()
         self.hello_thread.start()
 
     def send_message(self, sender, recipient, message):
         # what to do with sender?
-        message_thread = MessageThread(PeerDaemon.create_packet("message", fro = self.info.username, to = recipient, message = message), self.peerlist, self.send_thread)
+        message_thread = MessageThread(PeerDaemon.create_packet("message", fro = self.info.username, to = recipient, message = message),
+            self.packet_queue, self.peerlist, (self.info.reg_ipv4, self.info.reg_port))
         message_thread.start()
         return True
 
     def update_peer_list(self):
-        self.send_thread.queue(PeerDaemon.create_packet("getlist"))
+        self.packet_queue.queue_message(PeerDaemon.create_packet("getlist"), (self.info.reg_ipv4, self.info.reg_port), 2, 2)
         return True
 
     def get_peer_list(self):
@@ -268,11 +201,11 @@ class PeerDaemon:
     def finish(self):
         self.hello_thread.stop_event.set()
         # TODO wait for 0 HELLO is sent after finish
-        # self.send_thread.stop_event.set()
-        # self.listen_thread.stop_event.set()
+        self.send_thread.stop_event.set()
+        self.socket.sendto(bytes("stop", "utf-8"), (str(self.info.chat_ipv4), self.info.chat_port))
         self.hello_thread.join()
-        # self.send_thread.join()
-        # self.listen_thread.join()
+        self.send_thread.join()
+        self.listen_thread.join()
         self.socket.close() 
 
 def main():
@@ -292,7 +225,11 @@ def main():
     parser.add_argument("-rp", "--reg-port", type = tools.port_check, required = True, metavar = "<port>",
         help = "port on which registration node listens for connections")
     args = parser.parse_args()
-    daemon = PeerDaemon(args)
+    try:
+        daemon = PeerDaemon(args)
+    except OSError as err:
+        tools.err_print("OS error: {0}".format(err))
+        return 1
     try:
         tools.run_server(daemon, args.id % 19991 + 10000)
     except KeyboardInterrupt:

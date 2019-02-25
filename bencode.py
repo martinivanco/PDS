@@ -1,14 +1,8 @@
-#
 __data = bytes();
 __s = 0;
 __l = 0;
 __enc = False;
 def encode(x):
-    """param:
-    object, contains int, str, list, dict or bytes.
-return:
-    bytes, return the bencoded data.
-    """
     if type(x) == int:
         return 'i'.encode() + str(x).encode() + 'e'.encode();
     elif type(x) == str:
@@ -39,12 +33,6 @@ return:
             raise TypeError('the arg data type is not support for bencode.');
 
 def decode(x = None, enc=False):
-    """param:
-    1. bytes, the bytes will be decode.
-    2. str or list, when can not decode with utf-8 charset will try using this charset decoding. 
-return:
-    object, unable decoding data will return bytes.
-    """
     global __data, __s, __l, __enc;
     if enc != False:
         __enc = enc;

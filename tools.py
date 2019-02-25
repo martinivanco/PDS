@@ -1,6 +1,8 @@
 import sys
 import argparse
 import uuid
+import queue
+import threading
 import ipaddress
 from xmlrpc.server import SimpleXMLRPCServer
 from xmlrpc.server import SimpleXMLRPCRequestHandler
@@ -12,6 +14,70 @@ OK = 2
 
 class RequestHandler(SimpleXMLRPCRequestHandler):
     rpc_paths = ('/RPC2',)
+
+class PacketQueue:
+    def __init__(self):
+        self.send_queue = queue.Queue()
+        self.ack_queue = []
+        self.ack_queue_lock = threading.Lock()
+
+    def queue_message(self, packet, address, attempts = 1, timeout = 0):
+        self.send_queue.put({"packet": packet, "address": address,
+            "attempts": attempts, "timeout": timeout})
+    
+    def pop_message(self):
+        if self.send_queue.empty():
+            return None
+        else:
+            message = self.send_queue.get()
+            if message["timeout"] > 0:
+                self.queue_ack(message)
+            return message
+
+    def queue_ack(self, message):
+        message["timestamp"] = time.time()
+        self.ack_queue_lock.acquire() # TODO really forever?
+        self.ack_queue.append(message["txid"])
+        self.ack_queue_lock.release()
+        timer = threading.Timer(message["timeout"], self.check_ack, message)
+        timer.start()
+
+    def pop_ack(self, txid):
+        for a in self.ack_queue:
+            if a == txid:
+                self.ack_queue_lock.acquire() # TODO really forever?
+                try:
+                    self.ack_queue.remove(a)
+                except ValueError:
+                    return False
+                self.ack_queue_lock.release()
+                return True
+        return False
+
+    def check_ack(self, message):
+        if self.pop_ack(message["txid"]):
+            message["attempts"] -= 1
+            if message["attempts"] > 0:
+                self.queue_message(message["packet"], message["address"], message["attempts"], message["timeout"])
+
+class SendThread(threading.Thread):
+    def __init__(self, socket, packet_queue):
+        super(SendThread, self).__init__()
+        self.socket = socket
+        self.packet_queue = packet_queue
+        self.stop_event = threading.Event()
+
+    def run(self):
+        while not self.stop_event.is_set():
+            message = self.packet_queue.pop_message()
+            if not message == None:
+                tools.dbg_print("Sending: {msg}\nTo: {to}\n- - - - - - - - - -".format(msg = message["packet"], to = message["address"]))
+                try:
+                    self.socket.sendto(bencode.encode(message["packet"]), message["address"])
+                except OSError as err:
+                    tools.err_print("OS error: {0}".format(err))
+            else:
+                self.stop_event.wait(0.1)
 
 def run_server(daemon, port):
     with SimpleXMLRPCServer(('localhost', port), requestHandler = RequestHandler) as server:
