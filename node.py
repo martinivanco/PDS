@@ -13,11 +13,8 @@ class NodeDatabase:
         self.database = []
         self.neighbours = []
 
-    def get_database(self):
-        full_db = []
-        full_db.extend(self.peers) # TODO remove timestamp and shit
-        full_db.extend(self.database)
-        return full_db
+    def get_list(self):
+        return [] # TODO
 
     def get_neighbours(self):
         return neighbours # TODO remove unnecessary shit
@@ -28,16 +25,16 @@ class NodeDatabase:
                 return (ip, n["port"])
         return None
 
-    def add_peer(self):
+    def hello_peer(self, message):
         pass
 
-    def remove_peer(self):
+    def remove_peer(self, username):
         pass
 
-    def add_neighbour(self):
+    def update_neighbour(self, message):
         pass
     
-    def remove_neighbour(self):
+    def remove_neighbour(self, ip, port):
         pass
 
 class TimerThread(threading.Thread):
@@ -47,15 +44,37 @@ class TimerThread(threading.Thread):
     def run(self):
         pass
 
-class ListenThread(threading.Thread):
+class ListenThread(tools.ListenThread):
     def __init__(self, socket, packet_queue, node_db):
-        super(ListenThread, self).__init__()
-        self.socket = socket
-        self.packet_queue = packet_queue
+        super(ListenThread, self).__init__(socket, packet_queue)
         self.node_db = node_db
 
     def run(self):
-        pass
+        while True:
+            message = self.recieve()
+            if message == "stop":
+                break
+            if message is False:
+                continue
+
+            if message["type"] == "hello":
+                self.node_db.hello_peer(message)
+            elif message["type"] == "getlist":
+                ack = tools.create_packet("ack")
+                ack["txid"] = message["txid"]
+                self.packet_queue.queue_message(ack, message["address"])
+                self.packet_queue.queue_message(tools.create_packet("list", peers = self.node_db.get_list()), message["address"])
+            elif message["type"] == "update":
+                self.process_update(message)
+            elif message["type"] == "disconnect":
+                self.node_db.remove_neighbour(message["address"][0], message["address"][1])
+            elif message["type"] == "ack":
+                self.packet_queue.pop_ack(message["txid"])
+            else:
+                tools.err_print("Error: Unexpected packet of type '{}'".format(message["type"]))
+
+    def process_update(self, message):
+        pass # TODO
 
 class NodeDaemon:
     def __init__(self, info):
@@ -70,7 +89,7 @@ class NodeDaemon:
         self.timeout_thread = None
 
     def get_database(self):
-        return self.node_db.get_database()
+        return self.node_db.get_list()
 
     def get_neighbour_list(self):
         return self.node_db.get_neighbours()
@@ -80,7 +99,7 @@ class NodeDaemon:
         return True
 
     def disconnect_from_node(self, ip):
-        packet = NodeDaemon.create_packet("disconnect")
+        packet = tools.create_packet("disconnect")
         address = self.node_db.get_neighbour_address(ip)
         if address == None:
             tools.err_print("Error: No neighbour with ip {}. Can't disconnect.".format())
@@ -91,17 +110,6 @@ class NodeDaemon:
     def synchronise_with_node(self, ip):
         # TODO add update packet to queue
         return True
-
-    @staticmethod
-    def create_packet(ptype, peers = None, db = None, verbose = None):
-        packet = {"type": ptype, "txid": tools.generate_txid()}
-        if not peers == None:
-            packet["peers"] = peers
-        if not db == None:
-            packet["db"] = db
-        if not verbose == None:
-            packet["verbose"] = verbose
-        return packet
 
     def finish(self):
         self.socket.sendto(bytes("stop", "utf-8"), (str(self.info.reg_ipv4), self.info.reg_port))

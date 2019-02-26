@@ -22,8 +22,7 @@ class PeerList:
 
     def update(self, updated_list):
         self.peers.clear()
-        for p in updated_list:
-            self.peers.append(p)
+        self.peers.extend(updated_list.values())
         self.update_event.set()
         self.update_event.clear()
 
@@ -46,9 +45,10 @@ class HelloThread(threading.Thread):
         self.packet_queue.queue_message(self.packet, self.node)
 
 class ListenThread(tools.ListenThread):
-    def __init__(self, socket, packet_queue, peerlist):
+    def __init__(self, socket, packet_queue, peerlist, username):
         super(ListenThread, self).__init__(socket, packet_queue)
         self.peerlist = peerlist
+        self.username = username
 
     def run(self):
         while True:
@@ -69,24 +69,45 @@ class ListenThread(tools.ListenThread):
 
     def process_list(self, message):
         if not "peers" in message:
-            self.send_error("Missing 'peers' field in packet of type 'list'.", message["address"])
+            self.send_error(message["txid"], "Missing 'peers' field in packet of type 'list'.", message["address"])
             return False
-        peers = packet["peers"]
-        if not type(peers) == dict:
-            self.send_error("Invalid contents of 'peers' field.", message["address"])
+        peers = message["peers"]
+        if type(peers) is not dict:
+            self.send_error(message["txid"], "Invalid contents of 'peers' field.", message["address"])
             return False
-        # TODO peer record format check
+        for p in peers:
+            if not self.check_peer_record(peers[p]):
+                self.send_error(message["txid"], "Invalid contents of 'peers' field.", message["address"])
+                return False
 
-        ack = PeerDaemon.create_packet("ack")
+        ack = tools.create_packet("ack")
         ack["txid"] = message["txid"]
         self.packet_queue.queue_message(ack, message["address"])
         self.peerlist.update(peers)
 
-    def process_message(self, message):
-        if not all(f in ("from", "to", "message") for f in message):
-            self.send_error("Missing fields in 'message' packet. Expected 'from', 'to' and 'message'.", sender)
+    def check_peer_record(self, record):
+        if not all(f in ("username", "ipv4", "port") for f in record):
             return False
-        # TODO check if we are the correct recipient
+        if type(record["username"]) != str:
+            return False
+        try:
+            tools.ip_check(record["ipv4"])
+            tools.port_check(record["port"])
+        except argparse.ArgumentTypeError:
+            return False
+        return True
+
+    def process_message(self, message):
+        if not all(f in message for f in ("from", "to", "message")):
+            self.send_error(message["txid"], "Missing fields in 'message' packet. Expected 'from', 'to' and 'message'.", message["address"])
+            return False
+        if not message["to"] == self.username:
+            self.send_error(message["txid"], "Incorrect IP or username.", message["address"])
+            return False
+
+        ack = tools.create_packet("ack")
+        ack["txid"] = message["txid"]
+        self.packet_queue.queue_message(ack, message["address"])
         print("{frm}: {msg}".format(frm = message["from"], msg = message["message"]))
 
 class MessageThread(threading.Thread):
@@ -98,7 +119,7 @@ class MessageThread(threading.Thread):
         self.node = node
 
     def run(self):
-        self.packet_queue.queue_message(PeerDaemon.create_packet("getlist"), self.node, 2, 2)
+        self.packet_queue.queue_message(tools.create_packet("getlist"), self.node, 2, 2)
         if self.peerlist.update_event.wait(5):
             address = self.peerlist.get_address(self.message["to"])
             if not address == None:
@@ -107,15 +128,15 @@ class MessageThread(threading.Thread):
 class PeerDaemon:
     def __init__(self, info):
         self.info = info
-        self.hello_packet = PeerDaemon.create_packet("hello",
-            username = info.username, ipv4 = str(self.info.chat_ipv4), port = self.info.chat_port)
+        self.hello_packet = tools.create_packet("hello",
+            username = self.info.username, ipv4 = str(self.info.chat_ipv4), port = self.info.chat_port)
         self.peerlist = PeerList()
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind((str(self.info.chat_ipv4), self.info.chat_port))
         self.packet_queue = tools.PacketQueue()
 
-        self.listen_thread = ListenThread(self.socket, self.packet_queue, self.peerlist)
+        self.listen_thread = ListenThread(self.socket, self.packet_queue, self.peerlist, self.info.username)
         self.send_thread = tools.SendThread(self.socket, self.packet_queue)
         self.hello_thread = HelloThread(self.hello_packet, (str(self.info.reg_ipv4), self.info.reg_port), self.packet_queue)
         self.listen_thread.start()
@@ -123,14 +144,14 @@ class PeerDaemon:
         self.hello_thread.start()
 
     def send_message(self, sender, recipient, message):
-        # what to do with sender?
-        message_thread = MessageThread(PeerDaemon.create_packet("message", fro = self.info.username, to = recipient, message = message),
-            self.packet_queue, self.peerlist, (self.info.reg_ipv4, self.info.reg_port))
+        # TODO what to do with sender?
+        message_thread = MessageThread(tools.create_packet("message", fro = self.info.username, to = recipient, message = message),
+            self.packet_queue, self.peerlist, (str(self.info.reg_ipv4), self.info.reg_port))
         message_thread.start()
         return True
 
     def update_peer_list(self):
-        self.packet_queue.queue_message(PeerDaemon.create_packet("getlist"), (self.info.reg_ipv4, self.info.reg_port), 2, 2)
+        self.packet_queue.queue_message(tools.create_packet("getlist"), (str(self.info.reg_ipv4), self.info.reg_port), 2, 2)
         return True
 
     def get_peer_list(self):
@@ -141,28 +162,12 @@ class PeerDaemon:
         self.info.reg_ipv4 = ip_address
         self.info.reg_port = port
         self.hello_thread.join()
-        self.hello_thread = HelloThread(self.hello_packet, (self.info.reg_ipv4, self.info.reg_port), self.packet_queue)
+        self.hello_thread = HelloThread(self.hello_packet, (str(self.info.reg_ipv4), self.info.reg_port), self.packet_queue)
         self.hello_thread.start()
         return True
 
-    @staticmethod
-    def create_packet(ptype, fro = None, to = None, message = None, username = None, ipv4 = None, port = None, verbose = None):
-        packet = {"type": ptype, "txid": tools.generate_txid()}
-        if not fro == None:
-            packet["from"] = fro
-            packet["to"] = to
-            packet["message"] = message
-        if not username == None:
-            packet["username"] = username
-            packet["ipv4"] = ipv4
-            packet["port"] = port
-        if not verbose == None:
-            packet["verbose"] = verbose
-        return packet
-
     def finish(self):
         self.hello_thread.stop_event.set()
-        # TODO wait for 0 HELLO is sent after finish
         self.send_thread.stop_event.set()
         self.socket.sendto(bytes("stop", "utf-8"), (str(self.info.chat_ipv4), self.info.chat_port))
         self.hello_thread.join()

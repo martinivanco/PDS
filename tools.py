@@ -5,13 +5,10 @@ import queue
 import threading
 import ipaddress
 import bencode
+import time
 from xmlrpc.server import SimpleXMLRPCServer
 from xmlrpc.server import SimpleXMLRPCRequestHandler
 from xmlrpc.client import ServerProxy
-
-ERR_FATAL = 4
-ERR_RECOVER = 1
-OK = 2
 
 class RequestHandler(SimpleXMLRPCRequestHandler):
     rpc_paths = ('/RPC2',)
@@ -21,16 +18,23 @@ class PacketQueue:
         self.send_queue = queue.Queue()
         self.ack_queue = []
         self.ack_queue_lock = threading.Lock()
+        self.queue_event = threading.Event()
+
+    def empty(self):
+        return self.send_queue.qsize() == 0
 
     def queue_message(self, packet, address, attempts = 1, timeout = 0):
         self.send_queue.put({"packet": packet, "address": address,
             "attempts": attempts, "timeout": timeout})
+        self.queue_event.set()
     
     def pop_message(self):
-        if self.send_queue.empty():
+        if self.send_queue.qsize() == 0:
             return None
         else:
             message = self.send_queue.get()
+            if self.send_queue.qsize() == 0:
+                self.queue_event.clear()
             if message["timeout"] > 0:
                 self.queue_ack(message)
             return message
@@ -38,9 +42,9 @@ class PacketQueue:
     def queue_ack(self, message):
         message["timestamp"] = time.time()
         self.ack_queue_lock.acquire() # TODO really forever?
-        self.ack_queue.append(message["txid"])
+        self.ack_queue.append(message["packet"]["txid"])
         self.ack_queue_lock.release()
-        timer = threading.Timer(message["timeout"], self.check_ack, message)
+        timer = threading.Timer(message["timeout"], self.check_ack, args=(message,))
         timer.start()
 
     def pop_ack(self, txid):
@@ -56,7 +60,7 @@ class PacketQueue:
         return False
 
     def check_ack(self, message):
-        if self.pop_ack(message["txid"]):
+        if self.pop_ack(message["packet"]["txid"]):
             message["attempts"] -= 1
             if message["attempts"] > 0:
                 self.queue_message(message["packet"], message["address"], message["attempts"], message["timeout"])
@@ -69,7 +73,8 @@ class SendThread(threading.Thread):
         self.stop_event = threading.Event()
 
     def run(self):
-        while not self.stop_event.is_set():
+        while not (self.stop_event.is_set() and self.packet_queue.empty()):
+            self.packet_queue.queue_event.wait()
             message = self.packet_queue.pop_message()
             if not message == None:
                 dbg_print("Sending: {msg}\nTo: {to}\n- - - - - - - - - -".format(msg = message["packet"], to = message["address"]))
@@ -77,8 +82,6 @@ class SendThread(threading.Thread):
                     self.socket.sendto(bencode.encode(message["packet"]), message["address"])
                 except OSError as err:
                     err_print("OS error: {0}".format(err))
-            else:
-                self.stop_event.wait(0.1) # TODO Make this cleaner
 
 class ListenThread(threading.Thread):
     def __init__(self, socket, packet_queue):
@@ -103,16 +106,17 @@ class ListenThread(threading.Thread):
         try:
             packet = bencode.decode(data)
         except Exception:
-            self.send_error("The packet could not be decoded.", sender)
+            self.send_error(generate_txid(), "The packet could not be decoded.", sender)
             return False
-        if not type(packet) is dict:
-            self.send_error("Wrong packet format. Expected json.", sender)
+        if type(packet) is not dict:
+            self.send_error(generate_txid(), "Wrong packet format. Expected json.", sender)
             return False
-        if not all(f in ("type", "txid") for f in packet):
-            self.send_error("Missing fields in packet. Expected at least 'type' and 'txid'.", sender)
+        if (not "type" in packet) or (not "txid" in packet):
+            self.send_error(generate_txid(), "Missing fields in packet. Expected at least 'type' and 'txid'.", sender)
             return False
         dbg_print("Recieved: {msg}\nFrom: {frm}\n- - - - - - - - - -".format(msg = packet, frm = sender))
-        if packet["type"] == "error": # TODO ERROR -> ACK
+        if packet["type"] == "error":
+            self.packet_queue.pop_ack(packet["txid"])
             if "verbose" in packet:
                 err_print("Error: " + packet["verbose"])
             else:
@@ -122,8 +126,10 @@ class ListenThread(threading.Thread):
         packet["address"] = sender
         return packet
 
-    def send_error(self, message, recipient):
-        self.packet_queue.queue_message(PeerDaemon.create_packet("error", verbose = message), recipient)
+    def send_error(self, txid, message, recipient):
+        packet = create_packet("error", verbose = message)
+        packet["txid"] = txid
+        self.packet_queue.queue_message(packet, recipient)
 
 def run_server(daemon, port):
     with SimpleXMLRPCServer(('localhost', port), requestHandler = RequestHandler) as server:
@@ -165,6 +171,24 @@ def port_check(value):
 
 def generate_txid():
     return uuid.uuid4().int & 0xffff
+
+def create_packet(ptype, fro = None, to = None, message = None, username = None, ipv4 = None, port = None, peers = None, db = None, verbose = None):
+    packet = {"type": ptype, "txid": generate_txid()}
+    if not fro == None:
+        packet["from"] = fro
+        packet["to"] = to
+        packet["message"] = message
+    if not username == None:
+        packet["username"] = username
+        packet["ipv4"] = ipv4
+        packet["port"] = port
+    if not peers == None:
+        packet["peers"] = peers
+    if not db == None:
+        packet["db"] = db
+    if not verbose == None:
+        packet["verbose"] = verbose
+    return packet
 
 def err_print(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
