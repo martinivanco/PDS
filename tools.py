@@ -4,6 +4,7 @@ import uuid
 import queue
 import threading
 import ipaddress
+import bencode
 from xmlrpc.server import SimpleXMLRPCServer
 from xmlrpc.server import SimpleXMLRPCRequestHandler
 from xmlrpc.client import ServerProxy
@@ -71,13 +72,58 @@ class SendThread(threading.Thread):
         while not self.stop_event.is_set():
             message = self.packet_queue.pop_message()
             if not message == None:
-                tools.dbg_print("Sending: {msg}\nTo: {to}\n- - - - - - - - - -".format(msg = message["packet"], to = message["address"]))
+                dbg_print("Sending: {msg}\nTo: {to}\n- - - - - - - - - -".format(msg = message["packet"], to = message["address"]))
                 try:
                     self.socket.sendto(bencode.encode(message["packet"]), message["address"])
                 except OSError as err:
-                    tools.err_print("OS error: {0}".format(err))
+                    err_print("OS error: {0}".format(err))
             else:
-                self.stop_event.wait(0.1)
+                self.stop_event.wait(0.1) # TODO Make this cleaner
+
+class ListenThread(threading.Thread):
+    def __init__(self, socket, packet_queue):
+        super(ListenThread, self).__init__()
+        self.socket = socket
+        self.packet_queue = packet_queue
+
+    def run(self):
+        pass
+
+    def recieve(self):
+        try:
+            data, address = self.socket.recvfrom(4096)
+        except OSError as err:
+            err_print("OS error: {0}".format(err))
+            return False
+        if data == bytes("stop", "utf-8"):
+            return "stop"
+        return self.check_data(data, address)
+
+    def check_data(self, data, sender):
+        try:
+            packet = bencode.decode(data)
+        except Exception:
+            self.send_error("The packet could not be decoded.", sender)
+            return False
+        if not type(packet) is dict:
+            self.send_error("Wrong packet format. Expected json.", sender)
+            return False
+        if not all(f in ("type", "txid") for f in packet):
+            self.send_error("Missing fields in packet. Expected at least 'type' and 'txid'.", sender)
+            return False
+        dbg_print("Recieved: {msg}\nFrom: {frm}\n- - - - - - - - - -".format(msg = packet, frm = sender))
+        if packet["type"] == "error": # TODO ERROR -> ACK
+            if "verbose" in packet:
+                err_print("Error: " + packet["verbose"])
+            else:
+                err_print("Unknown error.")
+            return False
+        
+        packet["address"] = sender
+        return packet
+
+    def send_error(self, message, recipient):
+        self.packet_queue.queue_message(PeerDaemon.create_packet("error", verbose = message), recipient)
 
 def run_server(daemon, port):
     with SimpleXMLRPCServer(('localhost', port), requestHandler = RequestHandler) as server:

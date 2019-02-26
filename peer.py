@@ -45,11 +45,9 @@ class HelloThread(threading.Thread):
         self.packet["port"] = 0
         self.packet_queue.queue_message(self.packet, self.node)
 
-class ListenThread(threading.Thread):
+class ListenThread(tools.ListenThread):
     def __init__(self, socket, packet_queue, peerlist):
-        super(ListenThread, self).__init__()
-        self.socket = socket
-        self.packet_queue = packet_queue
+        super(ListenThread, self).__init__(socket, packet_queue)
         self.peerlist = peerlist
 
     def run(self):
@@ -68,39 +66,6 @@ class ListenThread(threading.Thread):
                 self.packet_queue.pop_ack(message["txid"])
             else:
                 tools.err_print("Error: Unexpected packet of type '{}'".format(message["type"]))
-
-    def recieve(self):
-        try:
-            data, address = self.socket.recvfrom(4096)
-        except OSError as err:
-            tools.err_print("OS error: {0}".format(err))
-            return False
-        if data == bytes("stop", "utf-8"):
-            return "stop"
-        return self.check_data(data, address)
-
-    def check_data(self, data, sender):
-        try:
-            packet = bencode.decode(data)
-        except Exception:
-            self.send_error("The packet could not be decoded.", sender)
-            return False
-        if not type(packet) is dict:
-            self.send_error("Wrong packet format. Expected json.", sender)
-            return False
-        if not all(f in ("type", "txid") for f in packet):
-            self.send_error("Missing fields in packet. Expected at least 'type' and 'txid'.", sender)
-            return False
-        tools.dbg_print("Recieved: {msg}\nFrom: {frm}\n- - - - - - - - - -".format(msg = packet, frm = sender))
-        if packet["type"] == "error":
-            if "verbose" in packet:
-                tools.err_print("Error: " + packet["verbose"])
-            else:
-                tools.err_print("Unknown error.")
-            return False
-        
-        packet["address"] = sender
-        return packet
 
     def process_list(self, message):
         if not "peers" in message:
@@ -123,9 +88,6 @@ class ListenThread(threading.Thread):
             return False
         # TODO check if we are the correct recipient
         print("{frm}: {msg}".format(frm = message["from"], msg = message["message"]))
-
-    def send_error(self, message, recipient):
-        self.packet_queue.queue_message(PeerDaemon.create_packet("error", verbose = message), recipient)
 
 class MessageThread(threading.Thread):
     def __init__(self, message, packet_queue, peerlist, node):
