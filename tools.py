@@ -111,7 +111,7 @@ class ListenThread(threading.Thread):
         if type(packet) is not dict:
             self.send_error(generate_txid(), "Wrong packet format. Expected json.", sender)
             return False
-        if (not "type" in packet) or (not "txid" in packet):
+        if not all(f in packet for f in ("type", "txid")):
             self.send_error(generate_txid(), "Missing fields in packet. Expected at least 'type' and 'txid'.", sender)
             return False
         dbg_print("Recieved: {msg}\nFrom: {frm}\n- - - - - - - - - -".format(msg = packet, frm = sender))

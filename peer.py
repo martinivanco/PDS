@@ -29,7 +29,7 @@ class PeerList:
 class HelloThread(threading.Thread):
     def __init__(self, packet, node, packet_queue):
         super(HelloThread, self).__init__()
-        self.packet = packet
+        self.packet = packet.copy()
         self.node = node
         self.packet_queue = packet_queue
         self.stop_event = threading.Event()
@@ -86,9 +86,9 @@ class ListenThread(tools.ListenThread):
         self.peerlist.update(peers)
 
     def check_peer_record(self, record):
-        if not all(f in ("username", "ipv4", "port") for f in record):
+        if not all(f in record for f in ("username", "ipv4", "port")):
             return False
-        if type(record["username"]) != str:
+        if type(record["username"]) is not str:
             return False
         try:
             tools.ip_check(record["ipv4"])
@@ -170,6 +170,7 @@ class PeerDaemon:
         self.hello_thread.stop_event.set()
         self.send_thread.stop_event.set()
         self.socket.sendto(bytes("stop", "utf-8"), (str(self.info.chat_ipv4), self.info.chat_port))
+        self.packet_queue.queue_event.set()
         self.hello_thread.join()
         self.send_thread.join()
         self.listen_thread.join()
