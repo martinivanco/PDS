@@ -8,143 +8,168 @@ import bencode
 import tools
 
 class NodeDatabase:
-    def __init__(self, address_key, packet_queue):
-        self.address_key = address_key
-        self.packet_queue = packet_queue
+    def __init__(self, node_address):
+        self.node_address = node_address
         self.peers = []
+        self.nodes = []
         self.database = {}
-        self.neighbours = []
         self.peer_lock = threading.Lock()
-        self.neighbour_lock = threading.Lock()
+        self.node_lock = threading.Lock()
+        self.update_event = threading.Event()
 
-    def get_list(self):
-        peerlist = {}
-        for i in range(len(self.peers)):
-            peerlist[str(i)] = {"username": self.peers[i]["username"], "ipv4": self.peers[i]["ipv4"], "port": self.peers[i]["port"]}
-        
-        offset = len(self.peers)
-        for r in self.database.values():
-            for p in r.values():
-                peerlist[str(offset)] = p
-                offset += 1
-
-        return peerlist
-
-    def get_neighbours(self):
-        neighbour_list = []
-        for n in self.neighbours:
-            neighbour_list.append({"ipv4": n["ipv4"], "port": n["port"]})
-        return neighbour_list
-
-    def get_database(self):
-        db = self.database.copy()
-        mydb = {}
-        for i in range(len(self.peers)):
-            mydb[str(i)] = {"username": self.peers[i]["username"], "ipv4": self.peers[i]["ipv4"], "port": self.peers[i]["port"]}
-        db[self.address_key] = mydb
-        return db
-
-    def hello_peer(self, username, ipv4, port):
-        for p in self.peers:
-            if p["username"] == username:
-                if ipv4 == "0.0.0.0" and port == 0:
-                    self.remove_peer(p)
-                else:
-                    self.peer_lock.acquire()
-                    p["timestamp"] = time.time()
-                    self.peer_lock.release()
-                return
-                
-        self.peer_lock.acquire()
-        self.peers.append({"username": username, "ipv4": ipv4, "port": port, "timestamp": time.time()})
-        self.peer_lock.release()
-        self.force_update()
-        tools.dbg_print("Added new peer: {}\n- - - - - - - - - -".format(username))
-
-    def remove_peer(self, peer):
-        self.peer_lock.acquire()
-        self.peers.remove(peer)
-        self.peer_lock.release()
-        self.force_update()
-        tools.dbg_print("Removed peer: {}\n- - - - - - - - - -".format(peer["username"]))
-
-    def clean_peers(self):
+    def get_oldest_hello(self):
         current_time = time.time()
         bye_time = current_time - 30
         oldest_peer = current_time
-        for p in self.peers:
-            if p["timestamp"] < bye_time:
-                tools.dbg_print("Peer timed out: {}\n- - - - - - - - - -".format(p["username"]))
-                self.remove_peer(p)
-            elif p["timestamp"] < oldest_peer:
-                oldest_peer = p["timestamp"]
+        with self.peer_lock:
+            for p in self.peers:
+                if p["hello"] <= bye_time:
+                    tools.dbg_print("Peer timed out: {}\n- - - - - - - - - -".format(p["username"]))
+                    self.remove_peer(p)
+                elif p["hello"] < oldest_peer:
+                    oldest_peer = p["hello"]
         return oldest_peer
 
-    def check_peer(self, address):
-        for p in self.peers:
-            if p["ipv4"] == address[0] and p["port"] == address[1]:
-                return True
-        return False
+    def hello_peer(self, username, ipv4, port):
+        with self.peer_lock:
+            for p in self.peers:
+                if p["username"] == username:
+                    if ipv4 == "0.0.0.0" and port == 0:
+                        self.remove_peer(p)
+                    else:
+                        p["hello"] = time.time()
+                    return
 
-    def update_neighbour(self, ipv4, port, his_peers):
-        for n in self.neighbours:
-            if n["ipv4"] == ipv4 and n["port"] == port:
-                self.neighbour_lock.acquire()
-                n["timestamp"] = time.time()
-                self.database["{ip},{po}".format(ip = ipv4, po = port)] = his_peers
-                self.neighbour_lock.release()
-                return
+            if ipv4 != "0.0.0.0" and port != 0:
+                self.add_peer({"username": username, "ipv4": ipv4, "port": port, "hello": time.time()})        
+
+    def getlist_peer(self, address):
+        found = False
+        with self.peer_lock:
+            for p in self.peers:
+                if p["ipv4"] == address[0] and p["port"] == address[1]:
+                    found = True
+        if not found:
+            return None
+
+        peerlist = {}
+        with self.peer_lock:
+            for i in range(len(self.peers)):
+                peerlist[str(i)] = {"username": self.peers[i]["username"], "ipv4": self.peers[i]["ipv4"], "port": self.peers[i]["port"]}
+            offset = len(self.peers)
         
-        self.neighbour_lock.acquire()
-        self.neighbours.append({"ipv4": ipv4, "port": port, "timestamp": time.time()})
-        self.database["{ip},{po}".format(ip = ipv4, po = port)] = his_peers
-        self.neighbour_lock.release()
-        tools.dbg_print("Added new neighbour: {ip}:{po}\n- - - - - - - - - -".format(ip = ipv4, po = port))
-    
-    def remove_neighbour(self, ipv4, port):
-        neighbour = None
-        for n in self.neighbours:
-            if n["ipv4"] == ipv4  and n["port"] == port:
-                neighbour = n
-                break
-        if neighbour == None:
-            return False
-        self.neighbour_lock.acquire()
-        self.neighbours.remove(neighbour)
-        self.database.pop("{ip},{po}".format(ip = ipv4, po = port))
-        self.neighbour_lock.release()
-        tools.dbg_print("Removed neighbour: {ip}:{po}\n- - - - - - - - - -".format(ip = ipv4, po = port))
+        with self.node_lock:
+            for r in self.database.values():
+                for p in r.values():
+                    peerlist[str(offset)] = p
+                    offset += 1
 
-    def clean_neighbours(self):
+        return peerlist
+
+    def add_peer(self, peer):
+        self.peers.append(peer)
+        self.update_event.set()
+        self.update_event.clear()
+        tools.dbg_print("Added new peer: {}\n- - - - - - - - - -".format(peer["username"]))
+
+    def remove_peer(self, peer):
+        self.peers.remove(peer)
+        self.update_event.set()
+        self.update_event.clear()
+        tools.dbg_print("Removed peer: {}\n- - - - - - - - - -".format(peer["username"]))
+
+    def get_oldest_echo(self):
         current_time = time.time()
-        bye_time = current_time - 30
-        oldest_neighbour = current_time
-        for n in self.neighbours:
-            if n["timestamp"] < bye_time:
-                self.remove_neighbour(n["ipv4"], n["port"])
-            elif n["timestamp"] < oldest_neighbour:
-                oldest_neighbour = n["timestamp"]
-        return oldest_neighbour
+        bye_time = current_time - 12
+        oldest_node = current_time
+        with self.node_lock
+            for n in self.nodes:
+                if n["echo"] <= bye_time:
+                    tools.dbg_print("Node timed out: {ip}:{po}\n- - - - - - - - - -".format(ip = n["ipv4"], po = n["port"]))
+                    self.remove_node(n)
+                elif n["echo"] < oldest_node:
+                    oldest_node = n["echo"]
+        return oldest_node
 
-    def force_update(self):
-        for n in self.neighbours:
-            self.packet_queue.queue_message(tools.create_packet("update", db = self.get_database()), (n["ipv4"], n["port"]))
+    def get_oldest_update(self, to_update):
+        current_time = time.time()
+        update_time = current_time - 4
+        oldest_node = current_time
+        with self.node_lock:
+            for n in self.nodes:
+                if n["update"] <= update_time:
+                    to_update.append((n["ipv4"], n["port"]))
+                    n["update"] = current_time
+                elif n["update"] < oldest_node:
+                    oldest_node = n["update"]
+        return oldest_node
+
+    def update_node(self, ipv4, port, db):
+        with self.node_lock:
+            for n in self.nodes:
+                if n["ipv4"] == ipv4 and n["port"] == port:
+                    n["echo"] = time.time()
+                    self.database["{ip},{po}".format(ip = ipv4, po = port)] = db
+                    return
+            
+            self.add_node({"ipv4": ipv4, "port": port, "echo": time.time(), "update": time.time()}, db)
+
+    def disconnect_node(self, ipv4, port):
+        with self.node_lock:
+            for n in self.neighbours:
+                if n["ipv4"] == ipv4  and n["port"] == port:
+                    self.remove_node(n)
+                    return
+
+    def add_node(self, node, db):
+        self.nodes.append(node)
+        self.database["{ip},{po}".format(ip = node["ipv4"], po = node["port"])] = db
+        tools.dbg_print("Added new node: {ip}:{po}\n- - - - - - - - - -".format(ip = node["ipv4"], po = node["port"]))
+
+    def remove_node(self, node):
+        self.nodes.remove(node)
+        self.database.pop("{ip},{po}".format(ip = node["ipv4"], po = node["port"]))
+        tools.dbg_print("Removed node: {ip}:{po}\n- - - - - - - - - -".format(ip = node["ipv4"], po = node["port"]))
+
+    def get_database(self):
+        with self.node_lock:
+            db = self.database.copy()
+
+        mydb = {}
+        with self.peer_lock:
+            for i in range(len(self.peers)):
+                mydb[str(i)] = {"username": self.peers[i]["username"], "ipv4": self.peers[i]["ipv4"], "port": self.peers[i]["port"]}
+                
+        db[self.node_address] = mydb
+        return db
+
+    def get_nodes(self):
+        node_list = []
+        with self.node_lock:
+            for n in self.node:
+                node_list.append({"ipv4": n["ipv4"], "port": n["port"]})
+        return node_list
 
 class TimerThread(threading.Thread):
-    def __init__(self, node_db):
+    def __init__(self, node_db, packet_queue):
         super(TimerThread, self).__init__()
         self.node_db = node_db
+        self.packet_queue = packet_queue
         self.stop_event = threading.Event()
 
     def run(self):
         while not self.stop_event:
-            next_peer = self.node_db.clean_peers() + 30
-            next_neighbour = self.node_db.clean_neighbours() + 12
-            if next_peer > next_neighbour:
-                wait_time = next_neighbour - time.time()
-            else:
-                wait_time = next_peer - time.time()
-            self.stop_event.wait(wait_time)
+            next_hello = self.node_db.get_oldest_hello() + 30
+            next_echo = self.node_db.get_oldest_echo() + 12
+            nodes_to_update = []
+            next_update = self.node_db.get_oldest_update(nodes_to_update) + 4
+
+            if len(nodes_to_update) > 0:
+                update_db = self.node_db.get_database()
+                for address in nodes_to_update:
+                    self.packet_queue.queue_message(tools.create_packet("update", db = update_db), address)
+
+            self.stop_event.wait(max(next_hello, next_echo, next_update) - time.time())
 
 class ListenThread(tools.ListenThread):
     def __init__(self, socket, packet_queue, node_db):
@@ -164,20 +189,22 @@ class ListenThread(tools.ListenThread):
             elif message["type"] == "getlist":
                 self.process_getlist(message)
             elif message["type"] == "update":
-                self.process_update(message)
+                # self.process_update(message)
+                pass
             elif message["type"] == "disconnect":
-                self.node_db.remove_neighbour(message["address"][0], message["address"][1])
+                # self.node_db.remove_neighbour(message["address"][0], message["address"][1])
+                pass
             elif message["type"] == "ack":
                 self.packet_queue.pop_ack(message["txid"])
             else:
-                tools.err_print("Error: Unexpected packet of type '{}'".format(message["type"]))
+                self.send_error(message["txid"], "Error: Unexpected packet of type '{}'".format(message["type"]), message["address"])
 
     def process_hello(self, message):
         if not all(f in message for f in ("username", "ipv4", "port")):
             self.send_error(message["txid"], "Missing fields in packet of type 'hello'. Expected 'username', 'ipv4' and 'port'.", message["address"])
             return False
-        if type(message["username"]) is not str or type(message["port"]) is not int:
-            self.send_error(message["txid"], "The username must be a string and the port must be a number.", message["address"])
+        if not (type(message["username"]) is str and type(message["ipv4"]) is str and type(message["port"]) is int):
+            self.send_error(message["txid"], "The username and ip must be strings and the port must be a number.", message["address"])
             return False
         try:
             tools.ip_check(message["ipv4"])
@@ -188,13 +215,15 @@ class ListenThread(tools.ListenThread):
         self.node_db.hello_peer(message["username"], message["ipv4"], message["port"])
 
     def process_getlist(self, message):
-        if not self.node_db.check_peer(message["address"]):
+        peerlist = self.node_db.getlist_peer(message["address"])
+        if peerlist == None:
             self.send_error(message["txid"], "Can't answer to unregistered peers.", message["address"])
             return False
+            
         ack = tools.create_packet("ack")
         ack["txid"] = message["txid"]
         self.packet_queue.queue_message(ack, message["address"])
-        self.packet_queue.queue_message(tools.create_packet("list", peers = self.node_db.get_list()), message["address"], 2, 2)
+        self.packet_queue.queue_message(tools.create_packet("list", peers = peerlist), message["address"], 2, 2)
 
     def process_update(self, message):
         if "db" not in message:
@@ -245,15 +274,15 @@ class ListenThread(tools.ListenThread):
 class NodeDaemon:
     def __init__(self, info):
         self.info = info
-        self.packet_queue = tools.PacketQueue()
-        self.node_db = NodeDatabase("{ip},{po}".format(ip = self.info.reg_ipv4, po = self.info.reg_port), self.packet_queue)
+        self.node_db = NodeDatabase("{ip},{po}".format(ip = self.info.reg_ipv4, po = self.info.reg_port))
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind((str(self.info.reg_ipv4), self.info.reg_port))
+        self.packet_queue = tools.PacketQueue()
         
         self.listen_thread = ListenThread(self.socket, self.packet_queue, self.node_db)
         self.send_thread = tools.SendThread(self.socket, self.packet_queue)
-        self.timer_thread = TimerThread(self.node_db)
+        self.timer_thread = TimerThread(self.node_db, self.packet_queue)
         self.listen_thread.start()
         self.send_thread.start()
         self.timer_thread.start()
@@ -262,14 +291,14 @@ class NodeDaemon:
         return self.node_db.get_database()
 
     def get_neighbour_list(self):
-        return self.node_db.get_neighbours()
+        return self.node_db.get_nodes()
 
     def connect_to_node(self, ip, port):
         self.packet_queue.queue_message(tools.create_packet("update", db = self.node_db.get_database()), (ip, port))
         return True
 
     def disconnect_from_node(self, ip, port):
-        self.packet_queue.queue_message(tools.create_packet("disconnect"), (ip, port))
+        self.packet_queue.queue_message(tools.create_packet("disconnect"), (ip, port), 2, 2)
         return True
         
     def synchronise_with_node(self, ip, port):
@@ -284,6 +313,7 @@ class NodeDaemon:
         self.timer_thread.join()
         self.send_thread.join()
         self.listen_thread.join()
+        # TODO send disconnects and wait for acks
         self.socket.close()
 
 def main():

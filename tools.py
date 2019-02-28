@@ -41,23 +41,21 @@ class PacketQueue:
 
     def queue_ack(self, message):
         message["timestamp"] = time.time()
-        self.ack_queue_lock.acquire() # TODO really forever?
-        self.ack_queue.append(message["packet"]["txid"])
-        self.ack_queue_lock.release()
+        with self.ack_queue_lock:
+            self.ack_queue.append(message["packet"]["txid"])
         timer = threading.Timer(message["timeout"], self.check_ack, args=(message,))
         timer.start()
 
     def pop_ack(self, txid):
-        for a in self.ack_queue:
-            if a == txid:
-                self.ack_queue_lock.acquire() # TODO really forever?
-                try:
-                    self.ack_queue.remove(a)
-                except ValueError:
-                    return False
-                self.ack_queue_lock.release()
-                return True
-        return False
+        with self.ack_queue_lock:
+            for a in self.ack_queue:
+                if a == txid:
+                    try:
+                        self.ack_queue.remove(a)
+                    except ValueError:
+                        return False
+                    return True
+            return False
 
     def check_ack(self, message):
         if self.pop_ack(message["packet"]["txid"]):

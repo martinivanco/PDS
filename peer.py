@@ -9,22 +9,26 @@ import tools
 class PeerList:
     def __init__(self):
         self.peers = []
+        self.peers_lock = threading.Lock()
         self.update_event = threading.Event()
     
     def get_list(self):
-        return self.peers
+        with self.peers_lock:
+            return self.peers.copy()
 
     def get_address(self, username):
-        for p in self.peers:
-            if p["username"] == username:
-                return (p["ipv4"], p["port"])
-        return None
+        with self.peers_lock:
+            for p in self.peers:
+                if p["username"] == username:
+                    return (p["ipv4"], p["port"])
+            return None
 
     def update(self, updated_list):
-        self.peers.clear()
-        self.peers.extend(updated_list.values())
-        self.update_event.set()
-        self.update_event.clear()
+        with self.peers_lock:
+            self.peers.clear()
+            self.peers.extend(updated_list.values())
+            self.update_event.set()
+            self.update_event.clear()
 
 class HelloThread(threading.Thread):
     def __init__(self, packet, node, packet_queue):
@@ -65,7 +69,7 @@ class ListenThread(tools.ListenThread):
             elif message["type"] == "ack":
                 self.packet_queue.pop_ack(message["txid"])
             else:
-                tools.err_print("Error: Unexpected packet of type '{}'".format(message["type"]))
+                self.send_error(message["txid"], "Error: Unexpected packet of type '{}'".format(message["type"]), message["address"])
 
     def process_list(self, message):
         if not "peers" in message:
@@ -144,8 +148,9 @@ class PeerDaemon:
         self.hello_thread.start()
 
     def send_message(self, sender, recipient, message):
-        # TODO what to do with sender?
-        message_thread = MessageThread(tools.create_packet("message", fro = self.info.username, to = recipient, message = message),
+        if sender != self.info.username:
+            tools.err_print("Warning: --from argument value does not match the username set to peer. Using the --from value anyway.")
+        message_thread = MessageThread(tools.create_packet("message", fro = sender, to = recipient, message = message),
             self.packet_queue, self.peerlist, (str(self.info.reg_ipv4), self.info.reg_port))
         message_thread.start()
         return True
