@@ -33,8 +33,8 @@ def main():
             help = "recipient")
         parser.add_argument("-m", "--message", required = "message" in sys.argv, metavar = "<message>",
             help = "message content")
-    if any(a in ("connect", "disconnect", "reconnect", "sync", "-h", "--help") for a in sys.argv):
-        parser.add_argument("-ri", "--reg-ipv4", required = any(a in ("connect", "disconnect", "reconnect", "sync") for a in sys.argv),
+    if any(a in ("connect", "reconnect", "-h", "--help") for a in sys.argv):
+        parser.add_argument("-ri", "--reg-ipv4", required = any(a in ("connect", "reconnect") for a in sys.argv),
             metavar = "<ip addr>", type = tools.ip_check, help = "nodes IP address")
         parser.add_argument("-rp", "--reg-port", required = any(a in ("connect", "reconnect") for a in sys.argv),
             metavar = "<port>", type = tools.port_check, help = "nodes operating port")
@@ -47,19 +47,19 @@ def main():
     elif args.command == 'getlist':
         s.update_peer_list()
     elif args.command == 'peers':
-        print(s.get_peer_list())
+        s.get_peer_list()
     elif args.command == 'reconnect':
         s.change_reg_node(str(args.reg_ipv4), args.reg_port)
     elif args.command == 'database':
-        print(s.get_database())
+        s.get_database()
     elif args.command == 'neighbors':
-        print(s.get_neighbour_list())
+        s.get_neighbour_list()
     elif args.command == 'connect':
         s.connect_to_node(str(args.reg_ipv4), args.reg_port)
     elif args.command == 'disconnect':
-        s.disconnect_from_node(str(args.reg_ipv4), args.reg_port)
+        s.disconnect_from_nodes()
     elif args.command == 'sync':
-        s.synchronise_with_node(str(args.reg_ipv4), args.reg_port)
+        s.synchronise_with_nodes()
     else:
         parser.error("unknown command '" + args.command + "'")
 

@@ -160,7 +160,9 @@ class PeerDaemon:
         return True
 
     def get_peer_list(self):
-        return self.peerlist.get_list()
+        # TODO send getlist
+        self.peerlist.get_list()
+        return True
     
     def change_reg_node(self, ip_address, port):
         self.hello_thread.stop_event.set()

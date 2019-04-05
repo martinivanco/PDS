@@ -23,9 +23,9 @@ class PacketQueue:
     def empty(self):
         return self.send_queue.qsize() == 0
 
-    def queue_message(self, packet, address, attempts = 1, timeout = 0):
+    def queue_message(self, packet, address, attempts = 1, timeout = 0, last_chance = 0):
         self.send_queue.put({"packet": packet, "address": address,
-            "attempts": attempts, "timeout": timeout})
+            "attempts": attempts, "timeout": timeout, "last_chance": last_chance})
         self.queue_event.set()
     
     def pop_message(self):
@@ -60,8 +60,13 @@ class PacketQueue:
     def check_ack(self, message):
         if self.pop_ack(message["packet"]["txid"]):
             message["attempts"] -= 1
+            if message["last_chance"] != 0:
+                if message["attempts"] == 1:
+                for x in range(message["last_chance"]):
+                    self.queue_message(message["packet"], message["address"])
+                return
             if message["attempts"] > 0:
-                self.queue_message(message["packet"], message["address"], message["attempts"], message["timeout"])
+                self.queue_message(message["packet"], message["address"], message["attempts"], message["timeout"], message["last_chance"])
 
 class SendThread(threading.Thread):
     def __init__(self, socket, packet_queue):

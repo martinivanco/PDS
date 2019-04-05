@@ -82,7 +82,7 @@ class NodeDatabase:
         current_time = time.time()
         bye_time = current_time - 12
         oldest_node = current_time
-        with self.node_lock
+        with self.node_lock:
             for n in self.nodes:
                 if n["echo"] <= bye_time:
                     tools.dbg_print("Node timed out: {ip}:{po}\n- - - - - - - - - -".format(ip = n["ipv4"], po = n["port"]))
@@ -110,16 +110,22 @@ class NodeDatabase:
                 if n["ipv4"] == ipv4 and n["port"] == port:
                     n["echo"] = time.time()
                     self.database["{ip},{po}".format(ip = ipv4, po = port)] = db
-                    return
+                    return True
             
             self.add_node({"ipv4": ipv4, "port": port, "echo": time.time(), "update": time.time()}, db)
+            return False
 
     def disconnect_node(self, ipv4, port):
         with self.node_lock:
-            for n in self.neighbours:
+            for n in self.nodes:
                 if n["ipv4"] == ipv4  and n["port"] == port:
                     self.remove_node(n)
                     return
+
+    def disconnect_all(self):
+        with self.node_lock:
+            for n in self.nodes:
+                self.remove_node(n)
 
     def add_node(self, node, db):
         self.nodes.append(node)
@@ -139,16 +145,25 @@ class NodeDatabase:
         with self.peer_lock:
             for i in range(len(self.peers)):
                 mydb[str(i)] = {"username": self.peers[i]["username"], "ipv4": self.peers[i]["ipv4"], "port": self.peers[i]["port"]}
-                
+
         db[self.node_address] = mydb
         return db
 
     def get_nodes(self):
         node_list = []
         with self.node_lock:
-            for n in self.node:
+            for n in self.nodes:
                 node_list.append({"ipv4": n["ipv4"], "port": n["port"]})
         return node_list
+
+    def remove_known_nodes(self, node_list):
+        with self.peer_lock:
+            for n in self.nodes:
+                if (n["ipv4"], n["port"]) in node_list:
+                    node_list.remove((n["ipv4"], n["port"]))
+        my_addr = self.node_address.split(",")
+        if (my_addr[0], int(my_addr[1])) in node_list:
+            node_list.remove((my_addr[0], int(my_addr[1])))
 
 class TimerThread(threading.Thread):
     def __init__(self, node_db, packet_queue):
@@ -158,7 +173,7 @@ class TimerThread(threading.Thread):
         self.stop_event = threading.Event()
 
     def run(self):
-        while not self.stop_event:
+        while not self.stop_event.is_set():
             next_hello = self.node_db.get_oldest_hello() + 30
             next_echo = self.node_db.get_oldest_echo() + 12
             nodes_to_update = []
@@ -169,7 +184,8 @@ class TimerThread(threading.Thread):
                 for address in nodes_to_update:
                     self.packet_queue.queue_message(tools.create_packet("update", db = update_db), address)
 
-            self.stop_event.wait(max(next_hello, next_echo, next_update) - time.time())
+            # tools.dbg_print("Sleeping for {} seconds.\n- - - - - - - - - -".format(min(next_hello, next_echo, next_update) - time.time()))
+            self.stop_event.wait(min(next_hello, next_echo, next_update) - time.time())
 
 class ListenThread(tools.ListenThread):
     def __init__(self, socket, packet_queue, node_db):
@@ -189,11 +205,12 @@ class ListenThread(tools.ListenThread):
             elif message["type"] == "getlist":
                 self.process_getlist(message)
             elif message["type"] == "update":
-                # self.process_update(message)
-                pass
+                self.process_update(message)
             elif message["type"] == "disconnect":
-                # self.node_db.remove_neighbour(message["address"][0], message["address"][1])
-                pass
+                self.node_db.disconnect_node(message["address"][0], message["address"][1])
+                ack = tools.create_packet("ack")
+                ack["txid"] = message["txid"]
+                self.packet_queue.queue_message(ack, message["address"])
             elif message["type"] == "ack":
                 self.packet_queue.pop_ack(message["txid"])
             else:
@@ -233,43 +250,48 @@ class ListenThread(tools.ListenThread):
             self.send_error(message["txid"], "Invalid contents of field 'db'.", message["address"])
             return False
 
-        for n in message["db"]:
-            n_split = n.split(",")
-            if len(n_split) != 2 or not self.check_node(n_split):
-                self.send_error(message["txid"], "Invalid contents of field 'db'.", message["address"])
+        node_list = []
+        for na in message["db"]:
+            address = self.check_node_address(na)
+            if address is False:
+                self.send_error(message["txid"], "Invalid index of DB_RECORD.", message["address"])
                 return False
-
-        key = "{ip},{po}".format(ip = message["address"][0], po = message["address"][1])
-        if key in message["db"] and not self.check_db_record(message["db"][key]):
-            self.send_error(message["txid"], "Invalid contents of field 'db'.", message["address"])
+            node_list.append(address)
+            
+        node_key = "{ip},{po}".format(ip = message["address"][0], po = message["address"][1])
+        if node_key in message["db"] and not self.check_node_db(message["db"][node_key]):
+            self.send_error(message["txid"], "Invalid contents of DB_RECORD.", message["address"])
             return False
-        
-        self.node_db.update_neighbour(message["address"][0], message["address"][1], message["db"][key])
+        if not self.node_db.update_node(message["address"][0], message["address"][1], message["db"][node_key]):
+            self.packet_queue.queue_message(tools.create_packet("update", db = self.node_db.get_database()), message["address"])
+
+        self.node_db.remove_known_nodes(node_list)
+        for na in node_list:
+            self.packet_queue.queue_message(tools.create_packet("update", db = self.node_db.get_database()), na)
     
-    def check_node(self, address):
+    def check_node_address(self, node_key):
+        if type(node_key) != str:
+            return False
+        address = node_key.split(",")
+        if len(address) != 2:
+            return False
         try:
-            n_ip = tools.ip_check(address[0])
-            n_port = tools.port_check(address[1])
+            tools.ip_check(address[0])
+            tools.port_check(address[1])
         except argparse.ArgumentTypeError:
             return False
-        
-        if (str(n_ip), n_port) not in self.node_db.neighbours:
-            self.packet_queue.queue_message(tools.create_packet("update", db = self.node_db.get_database()), (str(n_ip), n_port))
-        return True
+        return (address[0], int(address[1]))
 
-    def check_db_record(self, record):
-        for p in record.values():
-            if not all(f in p for f in ("username", "ipv4", "port")):
-                return False
-            if type(p["username"]) is not str or type(p["port"]) is not int:
+    def check_node_db(self, database):
+        for p in database.values():
+            if not (all(f in p for f in ("username", "ipv4", "port")) and type(p["username"]) is str and type(p["ipv4"]) is str and type(p["port"]) is int):
                 return False
             try:
                 tools.ip_check(p["ipv4"])
                 tools.port_check(p["port"])
             except argparse.ArgumentTypeError:
                 return False
-
-        return True
+        return True        
 
 class NodeDaemon:
     def __init__(self, info):
@@ -288,24 +310,32 @@ class NodeDaemon:
         self.timer_thread.start()
 
     def get_database(self):
-        return self.node_db.get_database()
+        print(self.node_db.get_database())
+        return True
 
     def get_neighbour_list(self):
-        return self.node_db.get_nodes()
+        print(self.node_db.get_nodes())
+        return True
 
     def connect_to_node(self, ip, port):
         self.packet_queue.queue_message(tools.create_packet("update", db = self.node_db.get_database()), (ip, port))
         return True
-
-    def disconnect_from_node(self, ip, port):
-        self.packet_queue.queue_message(tools.create_packet("disconnect"), (ip, port), 2, 2)
+   
+    def disconnect_from_nodes(self):
+        nodes = self.node_db.get_nodes()
+        for n in self.nodes:
+            self.packet_queue.queue_message(tools.create_packet("disconnect"), (n["ipv4"], n["port"]), 2, 2, 3)
+        self.node_db.disconnect_all()
         return True
-        
-    def synchronise_with_node(self, ip, port):
-        self.packet_queue.queue_message(tools.create_packet("update", db = self.node_db.get_database()), (ip, port))
+
+    def synchronise_with_nodes(self):
+        nodes = self.node_db.get_nodes()
+        for n in self.nodes:
+            self.packet_queue.queue_message(tools.create_packet("update", db = self.node_db.get_database()), (n["ipv4"], n["port"]))
         return True
 
     def finish(self):
+        self.disconnect_from_nodes()
         self.timer_thread.stop_event.set()
         self.socket.sendto(bytes("stop", "utf-8"), (str(self.info.reg_ipv4), self.info.reg_port))
         self.send_thread.stop_event.set()
@@ -313,7 +343,6 @@ class NodeDaemon:
         self.timer_thread.join()
         self.send_thread.join()
         self.listen_thread.join()
-        # TODO send disconnects and wait for acks
         self.socket.close()
 
 def main():
