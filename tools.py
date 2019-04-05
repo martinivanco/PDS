@@ -60,13 +60,16 @@ class PacketQueue:
     def check_ack(self, message):
         if self.pop_ack(message["packet"]["txid"]):
             message["attempts"] -= 1
-            if message["last_chance"] != 0:
-                if message["attempts"] == 1:
+            if message["attempts"] == 1 and message["last_chance"] != 0:
+                err_print("ERROR: ACK for packet {} timed out. Performing triple resend.".format(message["packet"]["txid"]))
                 for x in range(message["last_chance"]):
                     self.queue_message(message["packet"], message["address"])
                 return
             if message["attempts"] > 0:
+                err_print("ERROR: ACK for packet {} timed out. Trying again.".format(message["packet"]["txid"]))
                 self.queue_message(message["packet"], message["address"], message["attempts"], message["timeout"], message["last_chance"])
+            else:
+                err_print("ERROR: ACK for packet {} timed out.".format(message["packet"]["txid"]))
 
 class SendThread(threading.Thread):
     def __init__(self, socket, packet_queue):

@@ -184,7 +184,6 @@ class TimerThread(threading.Thread):
                 for address in nodes_to_update:
                     self.packet_queue.queue_message(tools.create_packet("update", db = update_db), address)
 
-            # tools.dbg_print("Sleeping for {} seconds.\n- - - - - - - - - -".format(min(next_hello, next_echo, next_update) - time.time()))
             self.stop_event.wait(min(next_hello, next_echo, next_update) - time.time())
 
 class ListenThread(tools.ListenThread):

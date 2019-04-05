@@ -128,6 +128,24 @@ class MessageThread(threading.Thread):
             address = self.peerlist.get_address(self.message["to"])
             if not address == None:
                 self.packet_queue.queue_message(self.message, address, 2, 2)
+            else:
+                err_print("ERROR: No peer with username {} found.".format(self.message["to"]))
+        else:
+            err_print("ERROR: No list recieved.")
+
+class GetListThread(threading.Thread):
+    def __init__(self, packet_queue, peerlist, node):
+        super(GetListThread, self).__init__()
+        self.packet_queue = packet_queue
+        self.peerlist = peerlist
+        self.node = node
+
+    def run(self):
+        self.packet_queue.queue_message(tools.create_packet("getlist"), self.node, 2, 2)
+        if self.peerlist.update_event.wait(5):
+            print(self.peerlist.get_list())
+        else:
+            err_print("ERROR: No list recieved.")
 
 class PeerDaemon:
     def __init__(self, info):
@@ -150,9 +168,8 @@ class PeerDaemon:
     def send_message(self, sender, recipient, message):
         if sender != self.info.username:
             tools.err_print("Warning: --from argument value does not match the username set to peer. Using the --from value anyway.")
-        message_thread = MessageThread(tools.create_packet("message", fro = sender, to = recipient, message = message),
-            self.packet_queue, self.peerlist, (str(self.info.reg_ipv4), self.info.reg_port))
-        message_thread.start()
+        MessageThread(tools.create_packet("message", fro = sender, to = recipient, message = message),
+            self.packet_queue, self.peerlist, (str(self.info.reg_ipv4), self.info.reg_port)).start()
         return True
 
     def update_peer_list(self):
@@ -160,8 +177,7 @@ class PeerDaemon:
         return True
 
     def get_peer_list(self):
-        # TODO send getlist
-        self.peerlist.get_list()
+        GetListThread(self.packet_queue, self.peerlist, (str(self.info.reg_ipv4), self.info.reg_port)).start()
         return True
     
     def change_reg_node(self, ip_address, port):
