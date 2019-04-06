@@ -12,6 +12,7 @@ class NodeDatabase:
         self.node_address = node_address
         self.peers = []
         self.nodes = []
+        self.blocked = []
         self.database = {}
         self.peer_lock = threading.Lock()
         self.node_lock = threading.Lock()
@@ -106,6 +107,10 @@ class NodeDatabase:
 
     def update_node(self, ipv4, port, db):
         with self.node_lock:
+            for b in self.blocked:
+                if n["ipv4"] == ipv4 and n["port"] == port:
+                    return False
+
             for n in self.nodes:
                 if n["ipv4"] == ipv4 and n["port"] == port:
                     n["echo"] = time.time()
@@ -125,14 +130,16 @@ class NodeDatabase:
     def disconnect_all(self):
         with self.node_lock:
             for n in self.nodes:
-                self.remove_node(n)
+                self.remove_node(n, True)
 
     def add_node(self, node, db):
         self.nodes.append(node)
         self.database["{ip},{po}".format(ip = node["ipv4"], po = node["port"])] = db
         tools.dbg_print("Added new node: {ip}:{po}\n- - - - - - - - - -".format(ip = node["ipv4"], po = node["port"]))
 
-    def remove_node(self, node):
+    def remove_node(self, node, block_updates = False):
+        if block_updates:
+            self.blocked.append(node)
         self.nodes.remove(node)
         self.database.pop("{ip},{po}".format(ip = node["ipv4"], po = node["port"]))
         tools.dbg_print("Removed node: {ip}:{po}\n- - - - - - - - - -".format(ip = node["ipv4"], po = node["port"]))
@@ -322,14 +329,14 @@ class NodeDaemon:
    
     def disconnect_from_nodes(self):
         nodes = self.node_db.get_nodes()
-        for n in self.nodes:
+        for n in nodes:
             self.packet_queue.queue_message(tools.create_packet("disconnect"), (n["ipv4"], n["port"]), 2, 2, 3)
         self.node_db.disconnect_all()
         return True
 
     def synchronise_with_nodes(self):
         nodes = self.node_db.get_nodes()
-        for n in self.nodes:
+        for n in nodes:
             self.packet_queue.queue_message(tools.create_packet("update", db = self.node_db.get_database()), (n["ipv4"], n["port"]))
         return True
 
