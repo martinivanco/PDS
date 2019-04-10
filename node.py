@@ -108,8 +108,8 @@ class NodeDatabase:
     def update_node(self, ipv4, port, db):
         with self.node_lock:
             for b in self.blocked:
-                if n["ipv4"] == ipv4 and n["port"] == port:
-                    return False
+                if b["ipv4"] == ipv4 and b["port"] == port:
+                    return True
 
             for n in self.nodes:
                 if n["ipv4"] == ipv4 and n["port"] == port:
@@ -127,20 +127,29 @@ class NodeDatabase:
                     self.remove_node(n)
                     return
 
-    def disconnect_all(self):
+    def disconnect_all(self, txids):
         with self.node_lock:
-            for n in self.nodes:
-                self.remove_node(n, True)
+            for i in range(len(self.nodes)):
+                self.remove_node(self.nodes[0], True, txids[i])
+
+    def pop_block(self, txid):
+        #TODO remove aftter two seconds even if no ACK
+        with self.node_lock:
+            for b in self.blocked:
+                if b["txid"] == txid:
+                    self.blocked.remove(b)
+                    return
 
     def add_node(self, node, db):
         self.nodes.append(node)
         self.database["{ip},{po}".format(ip = node["ipv4"], po = node["port"])] = db
         tools.dbg_print("Added new node: {ip}:{po}\n- - - - - - - - - -".format(ip = node["ipv4"], po = node["port"]))
 
-    def remove_node(self, node, block_updates = False):
-        if block_updates:
-            self.blocked.append(node)
+    def remove_node(self, node, block_updates = False, txid = 0):
         self.nodes.remove(node)
+        if block_updates:
+            node["txid"] = txid
+            self.blocked.append(node)
         self.database.pop("{ip},{po}".format(ip = node["ipv4"], po = node["port"]))
         tools.dbg_print("Removed node: {ip}:{po}\n- - - - - - - - - -".format(ip = node["ipv4"], po = node["port"]))
 
@@ -164,7 +173,7 @@ class NodeDatabase:
         return node_list
 
     def remove_known_nodes(self, node_list):
-        with self.peer_lock:
+        with self.node_lock:
             for n in self.nodes:
                 if (n["ipv4"], n["port"]) in node_list:
                     node_list.remove((n["ipv4"], n["port"]))
@@ -197,12 +206,14 @@ class ListenThread(tools.ListenThread):
     def __init__(self, socket, packet_queue, node_db):
         super(ListenThread, self).__init__(socket, packet_queue)
         self.node_db = node_db
+        self.stop = False
 
     def run(self):
-        while True:
+        while not (self.stop and self.packet_queue.empty()):
             message = self.recieve()
             if message == "stop":
-                break
+                self.stop = True
+                continue
             if message is False:
                 continue
 
@@ -219,6 +230,7 @@ class ListenThread(tools.ListenThread):
                 self.packet_queue.queue_message(ack, message["address"])
             elif message["type"] == "ack":
                 self.packet_queue.pop_ack(message["txid"])
+                self.node_db.pop_block(message["txid"])
             else:
                 self.send_error(message["txid"], "Error: Unexpected packet of type '{}'".format(message["type"]), message["address"])
 
@@ -246,7 +258,9 @@ class ListenThread(tools.ListenThread):
         ack = tools.create_packet("ack")
         ack["txid"] = message["txid"]
         self.packet_queue.queue_message(ack, message["address"])
-        self.packet_queue.queue_message(tools.create_packet("list", peers = peerlist), message["address"], 2, 2)
+        response = tools.create_packet("list", peers = peerlist)
+        response["txid"] = message["txid"]
+        self.packet_queue.queue_message(response, message["address"], 2, 2)
 
     def process_update(self, message):
         if "db" not in message:
@@ -329,9 +343,12 @@ class NodeDaemon:
    
     def disconnect_from_nodes(self):
         nodes = self.node_db.get_nodes()
+        txids = []
         for n in nodes:
-            self.packet_queue.queue_message(tools.create_packet("disconnect"), (n["ipv4"], n["port"]), 2, 2, 3)
-        self.node_db.disconnect_all()
+            p = tools.create_packet("disconnect")
+            txids.append(p["txid"])
+            self.packet_queue.queue_message(p, (n["ipv4"], n["port"]), 2, 2, 3)
+        self.node_db.disconnect_all(txids)
         return True
 
     def synchronise_with_nodes(self):

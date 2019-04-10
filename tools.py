@@ -6,6 +6,7 @@ import threading
 import ipaddress
 import bencode
 import time
+import logging
 from xmlrpc.server import SimpleXMLRPCServer
 from xmlrpc.server import SimpleXMLRPCRequestHandler
 from xmlrpc.client import ServerProxy
@@ -21,11 +22,12 @@ class PacketQueue:
         self.queue_event = threading.Event()
 
     def empty(self):
-        return self.send_queue.qsize() == 0
+        with self.ack_queue_lock:
+            return len(self.ack_queue) == 0 and self.send_queue.qsize() == 0
 
-    def queue_message(self, packet, address, attempts = 1, timeout = 0, last_chance = 0):
+    def queue_message(self, packet, address, attempts = 1, timeout = 0, last_chance = 0, ack_event = None):
         self.send_queue.put({"packet": packet, "address": address,
-            "attempts": attempts, "timeout": timeout, "last_chance": last_chance})
+            "attempts": attempts, "timeout": timeout, "last_chance": last_chance, "ack_event": ack_event})
         self.queue_event.set()
     
     def pop_message(self):
@@ -42,23 +44,23 @@ class PacketQueue:
     def queue_ack(self, message):
         message["timestamp"] = time.time()
         with self.ack_queue_lock:
-            self.ack_queue.append(message["packet"]["txid"])
+            self.ack_queue.append(message)
         timer = threading.Timer(message["timeout"], self.check_ack, args=(message,))
         timer.start()
 
     def pop_ack(self, txid):
         with self.ack_queue_lock:
             for a in self.ack_queue:
-                if a == txid:
+                if a["packet"]["txid"] == txid:
                     try:
                         self.ack_queue.remove(a)
                     except ValueError:
-                        return False
-                    return True
-            return False
+                        return None
+                    return a
+            return None
 
     def check_ack(self, message):
-        if self.pop_ack(message["packet"]["txid"]):
+        if self.pop_ack(message["packet"]["txid"]) is not None:
             message["attempts"] -= 1
             if message["attempts"] == 1 and message["last_chance"] != 0:
                 err_print("ERROR: ACK for packet {} timed out. Performing triple resend.".format(message["packet"]["txid"]))
@@ -138,7 +140,7 @@ class ListenThread(threading.Thread):
         self.packet_queue.queue_message(packet, recipient)
 
 def run_server(daemon, port):
-    with SimpleXMLRPCServer(('localhost', port), requestHandler = RequestHandler) as server:
+    with SimpleXMLRPCServer(('localhost', port), requestHandler = RequestHandler, logRequests = False) as server:
         server.register_instance(daemon)
         server.serve_forever()
 

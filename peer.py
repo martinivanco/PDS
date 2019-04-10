@@ -67,7 +67,9 @@ class ListenThread(tools.ListenThread):
             elif message["type"] == "message":
                 self.process_message(message)
             elif message["type"] == "ack":
-                self.packet_queue.pop_ack(message["txid"])
+                ack = self.packet_queue.pop_ack(message["txid"])
+                if ack["ack_event"] is not None:
+                    ack["ack_event"].set()
             else:
                 self.send_error(message["txid"], "Error: Unexpected packet of type '{}'".format(message["type"]), message["address"])
 
@@ -123,15 +125,20 @@ class MessageThread(threading.Thread):
         self.node = node
 
     def run(self):
-        self.packet_queue.queue_message(tools.create_packet("getlist"), self.node, 2, 2)
-        if self.peerlist.update_event.wait(5):
+        ack_wait_event = threading.Event()
+        self.packet_queue.queue_message(tools.create_packet("getlist"), self.node, 1, 2, ack_event = ack_wait_event)
+        if not ack_wait_event.wait(2):
+            tools.err_print("ERROR: GETLIST not ACK'ed.")
+            return
+
+        if self.peerlist.update_event.wait(2):
             address = self.peerlist.get_address(self.message["to"])
             if not address == None:
                 self.packet_queue.queue_message(self.message, address, 2, 2)
             else:
-                err_print("ERROR: No peer with username {} found.".format(self.message["to"]))
+                tools.err_print("ERROR: No peer with username {} found.".format(self.message["to"]))
         else:
-            err_print("ERROR: No list recieved.")
+            tools.err_print("ERROR: No LIST recieved.")
 
 class GetListThread(threading.Thread):
     def __init__(self, packet_queue, peerlist, node):
@@ -141,11 +148,16 @@ class GetListThread(threading.Thread):
         self.node = node
 
     def run(self):
-        self.packet_queue.queue_message(tools.create_packet("getlist"), self.node, 2, 2)
+        ack_wait_event = threading.Event()
+        self.packet_queue.queue_message(tools.create_packet("getlist"), self.node, 1, 2, ack_event = ack_wait_event)
+        if not ack_wait_event.wait(2):
+            tools.err_print("ERROR: GETLIST not ACK'ed.")
+            return
+
         if self.peerlist.update_event.wait(5):
             print(self.peerlist.get_list())
         else:
-            err_print("ERROR: No list recieved.")
+            tools.err_print("ERROR: No LIST recieved.")
 
 class PeerDaemon:
     def __init__(self, info):
