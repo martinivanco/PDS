@@ -1,3 +1,5 @@
+#!/usr/bin/python3
+
 import sys
 import time
 import argparse
@@ -319,6 +321,8 @@ class NodeDaemon:
         self.node_db = NodeDatabase("{ip},{po}".format(ip = self.info.reg_ipv4, po = self.info.reg_port))
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2**16)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2**16)
         self.socket.bind((str(self.info.reg_ipv4), self.info.reg_port))
         self.packet_queue = tools.PacketQueue()
         
@@ -364,8 +368,11 @@ class NodeDaemon:
         self.send_thread.stop_event.set()
         self.packet_queue.queue_event.set()
         self.timer_thread.join()
+        tools.dbg_print("Joining send thread.\n- - - - - - - - - -")
         self.send_thread.join()
+        tools.dbg_print("Joining listen thread.\n- - - - - - - - - -")
         self.listen_thread.join()
+        tools.dbg_print("Closing socket.\n- - - - - - - - - -")
         self.socket.close()
 
 def main():

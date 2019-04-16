@@ -1,3 +1,5 @@
+#!/usr/bin/python3
+
 __data = bytes();
 __s = 0;
 __l = 0;

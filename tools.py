@@ -1,3 +1,5 @@
+#!/usr/bin/python3
+
 import sys
 import argparse
 import uuid
@@ -82,7 +84,8 @@ class SendThread(threading.Thread):
 
     def run(self):
         while not (self.stop_event.is_set() and self.packet_queue.empty()):
-            self.packet_queue.queue_event.wait()
+            if not self.packet_queue.queue_event.wait(2):
+                continue
             message = self.packet_queue.pop_message()
             if not message == None:
                 dbg_print("Sending: {msg}\nTo: {to}\n- - - - - - - - - -".format(msg = message["packet"], to = message["address"]))
@@ -102,7 +105,7 @@ class ListenThread(threading.Thread):
 
     def recieve(self):
         try:
-            data, address = self.socket.recvfrom(4096)
+            data, address = self.socket.recvfrom(2**16)
         except OSError as err:
             err_print("OS error: {0}".format(err))
             return False
