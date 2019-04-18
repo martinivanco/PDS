@@ -157,7 +157,13 @@ class GetListThread(threading.Thread):
             return
 
         if self.peerlist.update_event.wait(5):
-            print(self.peerlist.get_list())
+            print("- - - - - - - - - -")
+            print("       PEERS       ")
+            print("- - - - - - - - - -")
+            peers = self.peerlist.get_list()
+            for p in peers:
+                print("{} at {}:{}".format(p["username"], p["ipv4"], p["port"]))
+            print("- - - - - - - - - -")
         else:
             tools.err_print("ERROR: No LIST recieved.")
 
@@ -205,10 +211,10 @@ class PeerDaemon:
 
     def finish(self):
         self.hello_thread.stop_event.set()
+        self.hello_thread.join()
         self.send_thread.stop_event.set()
         self.socket.sendto(bytes("stop", "utf-8"), (str(self.info.chat_ipv4), self.info.chat_port))
         self.packet_queue.queue_event.set()
-        self.hello_thread.join()
         self.send_thread.join()
         self.listen_thread.join()
         self.socket.close() 

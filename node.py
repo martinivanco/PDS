@@ -134,8 +134,19 @@ class NodeDatabase:
             for i in range(len(self.nodes)):
                 self.remove_node(self.nodes[0], True, txids[i])
 
+    def get_oldest_block(self):
+        current_time = time.time()
+        unblock_time = current_time - 2
+        oldest_block = current_time
+        with self.node_lock:
+            for b in self.blocked:
+                if b["block"] <= unblock_time:
+                    self.pop_block(b["txid"])
+                elif b["block"] < oldest_block:
+                    oldest_block = b["block"]
+        return oldest_block + 10 if oldest_block == current_time else oldest_block
+
     def pop_block(self, txid):
-        #TODO remove aftter two seconds even if no ACK
         with self.node_lock:
             for b in self.blocked:
                 if b["txid"] == txid:
@@ -151,6 +162,7 @@ class NodeDatabase:
         self.nodes.remove(node)
         if block_updates:
             node["txid"] = txid
+            node["block"] = time.time()
             self.blocked.append(node)
         self.database.pop("{ip},{po}".format(ip = node["ipv4"], po = node["port"]))
         tools.dbg_print("Removed node: {ip}:{po}\n- - - - - - - - - -".format(ip = node["ipv4"], po = node["port"]))
@@ -194,6 +206,7 @@ class TimerThread(threading.Thread):
         while not self.stop_event.is_set():
             next_hello = self.node_db.get_oldest_hello() + 30
             next_echo = self.node_db.get_oldest_echo() + 12
+            next_unblock = self.node_db.get_oldest_block() + 2
             nodes_to_update = []
             next_update = self.node_db.get_oldest_update(nodes_to_update) + 4
 
@@ -202,7 +215,7 @@ class TimerThread(threading.Thread):
                 for address in nodes_to_update:
                     self.packet_queue.queue_message(tools.create_packet("update", db = update_db), address)
 
-            self.stop_event.wait(min(next_hello, next_echo, next_update) - time.time())
+            self.stop_event.wait(min(next_hello, next_echo, next_unblock, next_update) - time.time())
 
 class ListenThread(tools.ListenThread):
     def __init__(self, socket, packet_queue, node_db):
@@ -321,8 +334,6 @@ class NodeDaemon:
         self.node_db = NodeDatabase("{ip},{po}".format(ip = self.info.reg_ipv4, po = self.info.reg_port))
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2**16)
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2**16)
         self.socket.bind((str(self.info.reg_ipv4), self.info.reg_port))
         self.packet_queue = tools.PacketQueue()
         
@@ -334,11 +345,26 @@ class NodeDaemon:
         self.timer_thread.start()
 
     def get_database(self):
-        print(self.node_db.get_database())
+        print("- - - - - - - - - -")
+        print("     DATABASE      ")
+        print("- - - - - - - - - -")
+        db = self.node_db.get_database()
+        for node, peers in db.items():
+            address = node.split(',')
+            print("Node at {}:{}".format(address[0], address[1]))
+            for p in peers.values():
+                print("\t-> {} at {}:{}".format(p["username"], p["ipv4"], p["port"]))
+        print("- - - - - - - - - -")
         return True
 
     def get_neighbour_list(self):
-        print(self.node_db.get_nodes())
+        print("- - - - - - - - - -")
+        print("     NEIGHBORS     ")
+        print("- - - - - - - - - -")
+        nodes = self.node_db.get_nodes()
+        for n in nodes:
+            print("Node at {}:{}".format(n["ipv4"], n["port"]))
+        print("- - - - - - - - - -")
         return True
 
     def connect_to_node(self, ip, port):
@@ -368,11 +394,8 @@ class NodeDaemon:
         self.send_thread.stop_event.set()
         self.packet_queue.queue_event.set()
         self.timer_thread.join()
-        tools.dbg_print("Joining send thread.\n- - - - - - - - - -")
         self.send_thread.join()
-        tools.dbg_print("Joining listen thread.\n- - - - - - - - - -")
         self.listen_thread.join()
-        tools.dbg_print("Closing socket.\n- - - - - - - - - -")
         self.socket.close()
 
 def main():
